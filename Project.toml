@@ -1,4 +1,5 @@
 [deps]
+BSON = "fbb218c0-5317-5bc6-957e-2ee96dd4b1f0"
 Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
 IJulia = "7073ff75-c697-5162-941a-fcdaad2a7d2a"
 ImageCore = "a09fc81d-aa75-5fe9-8630-4744c3626534"

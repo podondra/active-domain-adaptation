@@ -35,6 +35,11 @@ git-tree-sha1 = "a598ecb0d717092b5539dbbe890c98bac842b072"
 uuid = "ab4f0b2a-ad5b-11e8-123f-65d77653426b"
 version = "0.2.0"
 
+[[BSON]]
+git-tree-sha1 = "ebcd6e22d69f21249b7b8668351ebf42d6dc87a1"
+uuid = "fbb218c0-5317-5bc6-957e-2ee96dd4b1f0"
+version = "0.3.4"
+
 [[Base64]]
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 
@@ -93,9 +98,9 @@ version = "1.16.1+1"
 
 [[ChainRules]]
 deps = ["ChainRulesCore", "Compat", "LinearAlgebra", "Random", "RealDot", "Statistics"]
-git-tree-sha1 = "f873bfa4c9d744852eaa1fe55643b28aa0925034"
+git-tree-sha1 = "242c82317ccf72ca4eb632d491b0f63447e63bfe"
 uuid = "082447d4-558c-5d27-93f4-14fc19e9eca2"
-version = "1.18.0"
+version = "1.18.1"
 
 [[ChainRulesCore]]
 deps = ["Compat", "LinearAlgebra", "SparseArrays"]
@@ -686,9 +691,9 @@ uuid = "14a3606d-f60d-562e-9121-12d972cd8159"
 
 [[NNlib]]
 deps = ["Adapt", "ChainRulesCore", "Compat", "LinearAlgebra", "Pkg", "Requires", "Statistics"]
-git-tree-sha1 = "afcfd88042cc5a62743c98ca311668ff5c03148a"
+git-tree-sha1 = "9a9e8947f96640d089c4e8696882c211325061c4"
 uuid = "872c559c-99b0-510c-b3b7-b6c96a88d5cd"
-version = "0.7.32"
+version = "0.7.33"
 
 [[NNlibCUDA]]
 deps = ["CUDA", "LinearAlgebra", "NNlib", "Random", "Statistics"]
