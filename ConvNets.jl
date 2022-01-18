@@ -1,23 +1,34 @@
 module ConvNets
 
-export ModifiedLeNet
-export forward_pass, predict, train!
+export LeNetVariant
+export early_stopping!, forward_pass, predict, train!
 export accuracy
 
 using BSON
 using Flux, Flux.Data, Flux.Losses, Flux.Optimise
 
-function ModifiedLeNet()
+function LeNetVariant()
+    # A variant of LeNet as presented in Hoffman et al. (2017)
+    # because it is used by Prabhu et al. (2021) and probably by Su et al. (2020).
+    # The original ConvNet uses ReLU after max pooling layers
+    # that is very strange if ReLU and max pooling is used (see Deep Learning book p. 336).
+    # Original LeNet-5 uses subsampling layers that compute average of theirs four inputs,
+    # multiply them by a trainable coefficient, add bias,
+    # and pass results through a sigmoid function (p. 2284 in LeCun et al. (1998).
+    # However, I think it work the same both ways.
+    # It also processes 28 times 28 images while it should process 32 times 32
+    # (see Fig. 2 in LeCun et al. (1998) and p. 2284: "The input is a 32x32 pixel image.").
+    # Therefore, the first hidden layer is bigger.
     Chain(
-        Conv((5, 5), 1 => 6, relu),
+        Conv((5, 5), 1 => 20, relu),
         MaxPool((2, 2)),
-        Conv((5, 5), 6 => 16, relu),
+        Conv((5, 5), 20 => 50, relu),
+        Dropout(0.5),
         MaxPool((2, 2)),
-        Conv((5, 5), 16 => 120, relu),
         flatten,
-        Dense(120, 84, relu),
-        # TODO Add dropout?
-        Dense(84, 10)
+        Dense(5 * 5 * 50, 500, relu),
+        Dropout(0.5),
+        Dense(500, 10)
     )
 end
 
@@ -33,8 +44,38 @@ function accuracy(y, ŷ)
     sum(y .== ŷ) / size(y, 1)
 end
 
-function train!(model, X_train, y_train, X_valid, y_valid;
-        batch_size=64, file_model, patience=32)
+function train!(model, X_train, y_train, X_valid=nothing, y_valid=nothing;
+        batch_size=128,    # used in Hoffman et al. (2017) and Prabhu et al. (2021)
+        n_epoch=60,   # used in Prabhu et al. (2021)
+        file_model)
+    model_gpu = gpu(model)
+    X_train_gpu, X_valid_gpu = gpu(X_train), gpu(X_valid)
+    y_train_onehot_gpu = gpu(Flux.onehotbatch(y_train, 1:10))
+
+    loader = DataLoader((X_train_gpu, y_train_onehot_gpu), batchsize=batch_size, shuffle=true)
+    optimizer = ADAM()
+    θ = params(model_gpu)
+    loss_function(x, y) = logitcrossentropy(model_gpu(x), y)
+
+    for epoch in 1:n_epoch
+        Flux.Optimise.train!(loss_function, θ, loader, optimizer)
+        # logging
+        ŷ_train = predict(model_gpu, X_train_gpu)
+        info = Dict(:epoch => epoch, :train => accuracy(y_train, ŷ_train))
+        if !isnothing(X_valid)
+            ŷ_valid = predict(model_gpu, X_valid_gpu)
+            info[:validation] = accuracy(y_valid, ŷ_valid)
+        end
+        @info "accuracy" info...
+    end
+
+    bson(file_model, model=cpu(model_gpu))
+end
+
+function early_stopping!(model, X_train, y_train, X_valid, y_valid;
+        batch_size=128,    # used in Hoffman et al. (2017)
+        patience=8,
+        file_model)
     model_gpu = gpu(model)
     X_train_gpu, X_valid_gpu = gpu(X_train), gpu(X_valid)
     y_train_onehot_gpu = gpu(Flux.onehotbatch(y_train, 1:10))
@@ -58,7 +99,7 @@ function train!(model, X_train, y_train, X_valid, y_valid;
         accuracy_valid = accuracy(y_valid, ŷ_valid)
         # TODO Log loss?
         
-        @info "accuracy" train=accuracy_train validation=accuracy_valid epoch=epoch
+        @info "accuracy" epoch=epoch train=accuracy_train validation=accuracy_valid
 
         if accuracy_valid > accuracy_valid_star
             i = 0
