@@ -1,7 +1,8 @@
 module ConvNets
 
 export LeNetVariant
-export early_stopping!, forward_pass, predict, train!
+export earlystopping!, finetune!, train!
+export forward, predict
 export accuracy
 
 using BSON
@@ -32,21 +33,39 @@ function LeNetVariant()
     )
 end
 
-function forward_pass(model_gpu, X_gpu)
+function forward(model_gpu, X_gpu)
     softmax(reduce(hcat, [cpu(model_gpu(x)) for x in Flux.Data.DataLoader(X_gpu, batchsize=2048)]))
 end
 
 function predict(model_gpu, X_gpu)
-    Flux.onecold(forward_pass(model_gpu, X_gpu))
+    Flux.onecold(forward(model_gpu, X_gpu))
 end
 
 function accuracy(y, ŷ)
     sum(y .== ŷ) / size(y, 1)
 end
 
-function train!(model, X_train, y_train, X_valid=nothing, y_valid=nothing;
+function finetune!(model_gpu, X_train, y_train,
         batch_size=128,    # used in Hoffman et al. (2017) and Prabhu et al. (2021)
-        n_epoch=60,   # used in Prabhu et al. (2021)
+        n_epoch=60)    # used in Prabhu et al. (2021)
+    X_train_gpu = gpu(X_train)
+    y_train_onehot_gpu = gpu(Flux.onehotbatch(y_train, 1:10))
+
+    loader = DataLoader((X_train_gpu, y_train_onehot_gpu), batchsize=batch_size, shuffle=true)
+    optimizer = ADAM()
+    θ = params(model_gpu)
+    loss_function(x, y) = logitcrossentropy(model_gpu(x), y)
+
+    for epoch in 1:n_epoch
+        Flux.Optimise.train!(loss_function, θ, loader, optimizer)
+    end
+
+    return model_gpu
+end
+
+function train!(model, X_train, y_train, X_valid, y_valid;
+        batch_size=128,    # used in Hoffman et al. (2017) and Prabhu et al. (2021)
+        n_epoch=60,    # used in Prabhu et al. (2021)
         file_model)
     model_gpu = gpu(model)
     X_train_gpu, X_valid_gpu = gpu(X_train), gpu(X_valid)
@@ -61,18 +80,16 @@ function train!(model, X_train, y_train, X_valid=nothing, y_valid=nothing;
         Flux.Optimise.train!(loss_function, θ, loader, optimizer)
         # logging
         ŷ_train = predict(model_gpu, X_train_gpu)
-        info = Dict(:epoch => epoch, :train => accuracy(y_train, ŷ_train))
-        if !isnothing(X_valid)
-            ŷ_valid = predict(model_gpu, X_valid_gpu)
-            info[:validation] = accuracy(y_valid, ŷ_valid)
-        end
-        @info "accuracy" info...
+        ŷ_valid = predict(model_gpu, X_valid_gpu)
+        accuracy_train = accuracy(y_train, ŷ_train)
+        accuracy_valid = accuracy(y_valid, ŷ_valid)
+        @info "accuracy" epoch=epoch train=accuracy_train validation=accuracy_valid
     end
 
     bson(file_model, model=cpu(model_gpu))
 end
 
-function early_stopping!(model, X_train, y_train, X_valid, y_valid;
+function earlystopping!(model, X_train, y_train, X_valid, y_valid;
         batch_size=128,    # used in Hoffman et al. (2017)
         patience=8,
         file_model)
