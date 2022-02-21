@@ -1,7 +1,8 @@
 module ActiveLearning
 
-export active_learning
+export simulate_al
 export entropy_sampling, random_sampling
+export oracle
 
 using Flux
 using Random
@@ -26,7 +27,12 @@ function entropy_sampling(model_gpu, X, n_query)
     perm[1:n_query], perm[n_query + 1:end]
 end
 
-function active_learning(query, model, X_pool, y_pool, X_test, y_test;
+function oracle(X_pool, index_query, index_pool)
+    # Oracle labels the whole query.
+    index_query, index_pool
+end
+
+function simulate_al(query, labeller, model, X_pool, y_pool, X_test, y_test;
         n_round=30, n_query=10)
     X_train, y_train = Array{Float32, 4}(undef, (32, 32, 1, 0)), Vector{Int64}(undef, 0)
     
@@ -34,9 +40,13 @@ function active_learning(query, model, X_pool, y_pool, X_test, y_test;
     X_test_gpu = gpu(X_test)
     accuracies = [accuracy(y_test, predict(model_gpu, X_test_gpu))]
     for round in 1:n_round
+        # Query (might be only preselection).
         index_query, index_pool = query(model_gpu, X_pool, n_query)
-        # Update target training set and unlabelled pool.
+        # Oracle (might be an inperfect human labeller/annotator
+        # that might not label/annotate the whole query).
+        index_query, index_pool = labeller(X_pool, index_query, index_pool)
         X_query, y_query = X_pool[:, :, :, index_query], y_pool[index_query]
+        # Update target training set and unlabelled pool.
         X_train, y_train = cat(X_train, X_query, dims=4), vcat(y_train, y_query)
         X_pool, y_pool = X_pool[:, :, :, index_pool], y_pool[index_pool]
         # Fine-tune the active learner.

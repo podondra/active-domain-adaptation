@@ -7,6 +7,8 @@ using ImageCore
 using MLDatasets
 using Random
 
+# TODO Should I do any data preparation e.g. stadardisation or normalisation?
+
 function get_mnist(dir)
     MNIST.traintensor(Float32, dir=dir), MNIST.trainlabels(dir=dir),
     MNIST.testtensor(Float32, dir=dir), MNIST.testlabels(dir=dir)
