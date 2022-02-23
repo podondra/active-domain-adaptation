@@ -2,58 +2,75 @@ module ActiveLearning
 
 export simulate_al
 export entropy_sampling, random_sampling
-export oracle
+export human_labeller, oracle
+export entropy
 
 using Flux
+using HDF5
+using Printf
 using Random
 
 include("ConvNets.jl")
 using .ConvNets
 
-function random_sampling(model_gpu, X, n_query)
-    n = size(X, ndims(X))
-    perm = randperm(n)
-    perm[1:n_query], perm[n_query + 1:end]
+function random_sampling(index_pool, prob_pool, n_query)
+    return shuffle(index_pool)[1:n_query]
 end
 
 log2entropy(x) = x != 0.0 ? log2(x) : 0.0
 
-entropy(ŷ_prob) = dropdims(-sum(ŷ_prob .* log2entropy.(ŷ_prob), dims=1), dims=1)
+entropy(prob) = dropdims(-sum(prob .* log2entropy.(prob), dims=1), dims=1)
 
-function entropy_sampling(model_gpu, X, n_query)
-    ŷ_prob = forward(model_gpu, gpu(X))
-    ŷ_entr = entropy(ŷ_prob)
-    perm = sortperm(ŷ_entr, rev=true)
-    perm[1:n_query], perm[n_query + 1:end]
+function entropy_sampling(index_pool, prob_pool, n_query)
+    entr_pool = entropy(prob_pool)
+    perm = sortperm(entr_pool, rev=true)
+    return index_pool[perm[1:n_query]]
 end
 
-function oracle(X_pool, index_query, index_pool)
+function oracle(index_query, round)
     # Oracle labels the whole query.
-    index_query, index_pool
+    return index_query
 end
 
-function simulate_al(query, labeller, model, X_pool, y_pool, X_test, y_test;
+function human_labeller(index_query, round, y, file)
+    h5open(file, "r+") do datafile
+        write(datafile, @sprintf("index_query_%d", round), index_query)
+    end
+    dataset = readline()
+    datafile = h5open(file, "r")
+    index_label = read(datafile, dataset)
+    close(datafile)
+    return index_label
+end
+
+function simulate_al(query, labeller, model, X, y, X_test, y_test;
         n_round=30, n_query=10)
-    X_train, y_train = Array{Float32, 4}(undef, (32, 32, 1, 0)), Vector{Int64}(undef, 0)
+    n = size(X, ndims(X))
+    index_pool = Vector{Int64}(1:n)
+    index_train = Vector{Int64}(undef, 0)
     
     model_gpu = gpu(model)
     X_test_gpu = gpu(X_test)
     accuracies = [accuracy(y_test, predict(model_gpu, X_test_gpu))]
     for round in 1:n_round
+        # Process pool.
+        X_pool = X[:, :, :, index_pool]
+        prob_pool = forward(model_gpu, gpu(X_pool))
         # Query (might be only preselection).
-        index_query, index_pool = query(model_gpu, X_pool, n_query)
-        # Oracle (might be an inperfect human labeller/annotator
-        # that might not label/annotate the whole query).
-        index_query, index_pool = labeller(X_pool, index_query, index_pool)
-        X_query, y_query = X_pool[:, :, :, index_query], y_pool[index_query]
-        # Update target training set and unlabelled pool.
-        X_train, y_train = cat(X_train, X_query, dims=4), vcat(y_train, y_query)
-        X_pool, y_pool = X_pool[:, :, :, index_pool], y_pool[index_pool]
+        index_query = query(index_pool, prob_pool, n_query)
+        # Oracle (might be an inperfect human labeller that might not label the whole query).
+        index_label = labeller(index_query, round)
+        # Update training set and pool.
+        index_train = union(index_train, index_label)
+        index_pool = setdiff(index_pool, index_label)
         # Fine-tune the active learner.
         # For other approaches see Prabhu et al. (2021) and Su et al. (2019).
-        model_gpu = finetune!(model_gpu, X_train, y_train)
+        X_train, y_train = X[:, :, :, index_train], y[index_train]
+        finetune!(model_gpu, X_train, y_train)
         # Evaluate performance.
-        accuracies = vcat(accuracies, accuracy(y_test, predict(model_gpu, X_test_gpu)))
+        accuracy_round = accuracy(y_test, predict(model_gpu, X_test_gpu))
+        @info "performance" round accuracy_round
+        accuracies = vcat(accuracies, accuracy_round)
     end
     return 0:n_round, accuracies
 end

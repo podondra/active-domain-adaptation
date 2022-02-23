@@ -21,6 +21,7 @@ function LeNetVariant()
     # (see Fig. 2 in LeCun et al. (1998) and p. 2284: "The input is a 32x32 pixel image.").
     # Therefore, the first hidden layer is bigger.
     Chain(
+        # TODO The input should have 2 dimensions and reshape here.
         Conv((5, 5), 1 => 20, relu),
         MaxPool((2, 2)),
         Conv((5, 5), 20 => 50, relu),
@@ -59,8 +60,6 @@ function finetune!(model_gpu, X_train, y_train,
     for epoch in 1:n_epoch
         Flux.Optimise.train!(loss_function, θ, loader, optimizer)
     end
-
-    return model_gpu
 end
 
 function train!(model, X_train, y_train, X_valid, y_valid;
