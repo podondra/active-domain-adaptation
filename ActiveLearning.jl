@@ -27,14 +27,16 @@ function entropy_sampling(index_pool, prob_pool, n_query)
     return index_pool[perm[1:n_query]]
 end
 
-function oracle(index_query, round)
+function oracle(index_query, prob_query, round)
     # Oracle labels the whole query.
     return index_query
 end
 
-function human_labeller(index_query, round, y, file)
+function human_labeller(index_query, prob_query, round, y, file)
+    entr_query = entropy(prob_query)
     h5open(file, "r+") do datafile
         write(datafile, @sprintf("index_query_%d", round), index_query)
+        write(datafile, @sprintf("entr_query_%d", round), entr_query)
     end
     dataset = readline()
     datafile = h5open(file, "r")
@@ -50,16 +52,15 @@ function simulate_al(query, labeller, model, X, y, X_test, y_test;
     index_train = Vector{Int64}(undef, 0)
     
     model_gpu = gpu(model)
-    X_test_gpu = gpu(X_test)
+    X_gpu, X_test_gpu = gpu(X), gpu(X_test)
     accuracies = [accuracy(y_test, predict(model_gpu, X_test_gpu))]
     for round in 1:n_round
-        # Process pool.
-        X_pool = X[:, :, :, index_pool]
-        prob_pool = forward(model_gpu, gpu(X_pool))
+        # Process not only pool but all data for easier indexing.
+        prob = forward(model_gpu, gpu(X_gpu))
         # Query (might be only preselection).
-        index_query = query(index_pool, prob_pool, n_query)
+        index_query = query(index_pool, prob[:, index_pool], n_query)
         # Oracle (might be an inperfect human labeller that might not label the whole query).
-        index_label = labeller(index_query, round)
+        index_label = labeller(index_query, prob[:, index_query], round)
         # Update training set and pool.
         index_train = union(index_train, index_label)
         index_pool = setdiff(index_pool, index_label)
