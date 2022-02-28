@@ -21,7 +21,6 @@ function LeNetVariant()
     # (see Fig. 2 in LeCun et al. (1998) and p. 2284: "The input is a 32x32 pixel image.").
     # Therefore, the first hidden layer is bigger.
     Chain(
-        # TODO The input should have 2 dimensions and reshape here.
         Conv((5, 5), 1 => 20, relu),
         MaxPool((2, 2)),
         Conv((5, 5), 20 => 50, relu),
@@ -35,11 +34,11 @@ function LeNetVariant()
 end
 
 function forward(model_gpu, X_gpu)
-    softmax(reduce(hcat, [cpu(model_gpu(x)) for x in Flux.Data.DataLoader(X_gpu, batchsize=2048)]))
+    reduce(hcat, [cpu(model_gpu(x)) for x in Flux.Data.DataLoader(X_gpu, batchsize=2048)])
 end
 
 function predict(model_gpu, X_gpu)
-    Flux.onecold(forward(model_gpu, X_gpu))
+    Flux.onecold(softmax(forward(model_gpu, X_gpu)))
 end
 
 function accuracy(y, ŷ)
@@ -102,7 +101,7 @@ function earlystopping!(model, X_train, y_train, X_valid, y_valid;
     loss_function(x, y) = logitcrossentropy(model_gpu(x), y)
 
     epoch = 0
-    accuracy_valid_star = typemin(Float32) 
+    accuracy_valid_star = typemin(Float32)
     i = 0
     while i < patience
         Flux.Optimise.train!(loss_function, θ, loader, optimizer)
@@ -113,8 +112,7 @@ function earlystopping!(model, X_train, y_train, X_valid, y_valid;
 
         accuracy_train = accuracy(y_train, ŷ_train)
         accuracy_valid = accuracy(y_valid, ŷ_valid)
-        # TODO Log loss?
-        
+
         @info "accuracy" epoch=epoch train=accuracy_train validation=accuracy_valid
 
         if accuracy_valid > accuracy_valid_star
