@@ -1,12 +1,9 @@
-using BSON
 using CSV
 using DataFrames
-using Flux
-using HDF5
 
-include("ActiveLearning.jl")
+include("ActiveDomainAdaptation.jl")
+using .ActiveDomainAdaptation
 include("DataSets.jl")
-using .ActiveLearning
 using .DataSets
 
 N_RUN = 30
@@ -16,9 +13,9 @@ X_mnist_train, y_mnist_train, X_mnist_test, y_mnist_test = prepare_mnist(get_mni
 
 random_sampling_df = DataFrame()
 for run in 1:N_RUN
+    lenet = LeNetVariant("lenet.bson")
     rounds_random, accuracies_random = simulate_al(
-                                                   random_sampling, oracle,
-                                                   BSON.load("lenet.bson")[:model],
+                                                   random_sampling, oracle, lenet,
                                                    X_mnist_train, y_mnist_train,
                                                    X_mnist_test, y_mnist_test,
                                                    n_query=N_QUERY_RANDOM)

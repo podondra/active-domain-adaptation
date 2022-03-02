@@ -6,10 +6,10 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
-#SBATCH --job-name=entropy
-#SBATCH --output=misc/entropy.out
+#SBATCH --job-name=random
+#SBATCH --output=misc/random.out
 
 module purge
 module load Julia/1.6.4-linux-x86_64
 
-srun julia --project entropy-sampling.jl
+srun julia --project random.jl
