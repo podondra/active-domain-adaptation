@@ -23,4 +23,4 @@ for run in 1:N_RUN
     global random_sampling_df = vcat(random_sampling_df, df)
 end
 
-CSV.write("data/random-sampling.csv", random_sampling_df)
+CSV.write("data/random.csv", random_sampling_df)

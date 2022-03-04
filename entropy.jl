@@ -23,4 +23,4 @@ for run in 1:N_RUN
     global entropy_sampling_df = vcat(entropy_sampling_df, df)
 end
 
-CSV.write("data/entropy-sampling.csv", entropy_sampling_df)
+CSV.write("data/entropy.csv", entropy_sampling_df)

@@ -1,9 +1,9 @@
 module ActiveDomainAdaptation
 
 export simulate_al
-export entropy_sampling, random_sampling
+export entropy_sampling, random_sampling, mcdropout_sampling
 export human_labeller, oracle
-export entropy
+export entropy, mc_mutual_information
 export log2entropy
 
 export LeNetVariant, MCLeNetVariant

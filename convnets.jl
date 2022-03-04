@@ -51,8 +51,15 @@ MCLeNetVariant(filepath::String, T::Int) = MCLeNetVariant(
                                                           gpu(BSON.load(filepath, @__MODULE__)[:model]),
                                                           20)
 
+struct DeepEnsemble
+    models
+    M::Int
+end
+
 function forward(model, X)
-    reduce(hcat, [cpu(model(x)) for x in Flux.Data.DataLoader(gpu(X), batchsize=2048)])
+    n = size(X, ndims(X))
+    batchsize = n < 2048 ? n : 2048
+    reduce(hcat, [cpu(model(x)) for x in Flux.Data.DataLoader(gpu(X), batchsize=batchsize)])
 end
 
 function probability(model::LeNetVariant, X)
@@ -80,6 +87,8 @@ function finetune!(model, X_train, y_train,
         batchsize=128,    # used in Hoffman et al. (2017) and Prabhu et al. (2021)
         n_epoch=60)    # used in Prabhu et al. (2021)
     y_train_onehot = Flux.onehotbatch(y_train, 1:10)
+    n = size(X_train, ndims(X_train))
+    batchsize = n < batchsize ? n : batchsize
     loader = DataLoader((gpu(X_train), gpu(y_train_onehot)), batchsize=batchsize, shuffle=true)
     optimizer = ADAM()
     θ = params(model.model)
@@ -114,11 +123,11 @@ function train!(model, X_train, y_train, X_valid, y_valid;
 end
 
 function earlystopping!(model, X_train, y_train, X_valid, y_valid;
-        batch_size=128,    # used in Hoffman et al. (2017)
+        batchsize=128,    # used in Hoffman et al. (2017)
         patience=8,
         file_model)
     y_train_onehot = Flux.onehotbatch(y_train, 1:10)
-    loader = DataLoader((gpu(X_train), gpu(y_train_onehot)), batchsize=batch_size, shuffle=true)
+    loader = DataLoader((gpu(X_train), gpu(y_train_onehot)), batchsize=batchsize, shuffle=true)
     optimizer = ADAM()
     θ = params(model.model)
     loss(x, y) = logitcrossentropy(model.model(x), y)
