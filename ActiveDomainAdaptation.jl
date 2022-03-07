@@ -6,7 +6,7 @@ export human_labeller, oracle
 export entropy, mc_mutual_information
 export log2entropy
 
-export LeNetVariant, MCLeNetVariant
+export DeepEnsemble, LeNetVariant, MCLeNetVariant
 export earlystopping!, finetune!, train!
 export forward, predict, probability
 export accuracy

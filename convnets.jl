@@ -56,6 +56,10 @@ struct DeepEnsemble
     M::Int
 end
 
+function DeepEnsemble(filepaths::Vector{String})
+    DeepEnsemble([LeNetVariant(filepath) for filepath in filepaths], length(filepaths))
+end
+
 function forward(model, X)
     n = size(X, ndims(X))
     batchsize = n < 2048 ? n : 2048
@@ -73,6 +77,11 @@ function probability(model::MCLeNetVariant, X)
     return reduce(vcat, map(addfirstdim, [softmax(forward(model.model, X)) for t in 1:model.T]))
 end
 
+function probability(ensemble::DeepEnsemble, X)
+    logits = [forward(model.model, X) for model in ensemble.models]
+    return sum([softmax(logit) for logit in logits]) ./ ensemble.M
+end
+
 function predict(model::LeNetVariant, X)
     Flux.onecold(probability(model, X))
 end
@@ -81,9 +90,13 @@ function predict(model::MCLeNetVariant, X)
     Flux.onecold(dropdims(sum(probability(model, X), dims=1), dims=1))
 end
 
+function predict(ensemble::DeepEnsemble, X)
+    return Flux.onecold(probability(ensemble, X))
+end
+
 accuracy(y, ŷ) = sum(y .== ŷ) / size(y, 1)
 
-function finetune!(model, X_train, y_train,
+function finetune!(model, X_train, y_train;
         batchsize=128,    # used in Hoffman et al. (2017) and Prabhu et al. (2021)
         n_epoch=60)    # used in Prabhu et al. (2021)
     y_train_onehot = Flux.onehotbatch(y_train, 1:10)
@@ -96,6 +109,12 @@ function finetune!(model, X_train, y_train,
 
     for epoch in 1:n_epoch
         Flux.Optimise.train!(loss, θ, loader, optimizer)
+    end
+end
+
+function finetune!(ensemble::DeepEnsemble, X_train, y_train; batchsize=128, n_epoch=60)
+    for model in ensemble.models
+        finetune!(model, X_train, y_train, batchsize=batchsize, n_epoch=n_epoch)
     end
 end
 
