@@ -73,6 +73,7 @@ These are the argument why to experiment only with 1. SVHN and MNIST, 2. SDSS QS
 ### Classification from SVHN to MNIST
 
 - TODO: Describe the variant of LeNet.
+- TODO Should I do data preparation, e.g. stadardisation or normalisation?
 
 SVHN dataset is available online, at http://ufldl.stanford.edu/housenumbers/.
 

@@ -6,10 +6,10 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
-#SBATCH --job-name=ensemble3
-#SBATCH --output=misc/ensemble3.out
+#SBATCH --job-name=lenet4
+#SBATCH --output=misc/lenet4.out
 
 module purge
 module load Julia/1.6.4-linux-x86_64
 
-srun julia --project --eval 'include("ensemble.jl"); train_ensemble("ensemble3")'
+srun julia --project lenet4.jl

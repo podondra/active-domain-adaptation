@@ -6,10 +6,10 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
-#SBATCH --job-name=ensemble
-#SBATCH --output=misc/ensemble.out
+#SBATCH --job-name=lenet3
+#SBATCH --output=misc/lenet3.out
 
 module purge
 module load Julia/1.6.4-linux-x86_64
 
-srun julia --project ensemble-ada.jl
+srun julia --project lenet3.jl

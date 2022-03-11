@@ -6,10 +6,10 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
-#SBATCH --job-name=mclenet
-#SBATCH --output=misc/mclenet.out
+#SBATCH --job-name=mcdropoutlenet
+#SBATCH --output=misc/mcdropoutlenet.out
 
 module purge
 module load Julia/1.6.4-linux-x86_64
 
-srun julia --project mclenet.jl
+srun julia --project mcdropoutlenet.jl

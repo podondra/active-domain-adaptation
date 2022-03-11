@@ -1,17 +1,6 @@
-module DataSets
-
-export get_mnist, get_svhn, prepare_mnist, prepare_svhn
-export train_valid_split
-
-using ImageCore
-using MLDatasets
-using Random
-
-# TODO Should I do any data preparation e.g. stadardisation or normalisation?
-
 function get_mnist(dir)
-    MNIST.traintensor(Float32, dir=dir), MNIST.trainlabels(dir=dir),
-    MNIST.testtensor(Float32, dir=dir), MNIST.testlabels(dir=dir)
+    MLDatasets.MNIST.traintensor(Float32, dir=dir), MLDatasets.MNIST.trainlabels(dir=dir),
+    MLDatasets.MNIST.testtensor(Float32, dir=dir), MLDatasets.MNIST.testlabels(dir=dir)
 end
 
 function prepare_mnist(dataset_mnist)
@@ -28,8 +17,8 @@ function prepare_mnist(dataset_mnist)
 end
 
 function get_svhn(dir)
-    SVHN2.traintensor(Float32, dir=dir), SVHN2.trainlabels(dir=dir),
-    SVHN2.testtensor(Float32, dir=dir), SVHN2.testlabels(dir=dir)
+    MLDatasets.SVHN2.traintensor(Float32, dir=dir), MLDatasets.SVHN2.trainlabels(dir=dir),
+    MLDatasets.SVHN2.testtensor(Float32, dir=dir), MLDatasets.SVHN2.testlabels(dir=dir)
 end
 
 function svhn2gray(X)
@@ -53,4 +42,14 @@ function train_valid_split(X, y)
     return X[:, :, :, index_train], y[index_train], X[:, :, :, index_valid], y[index_valid]
 end
 
+function get_dr12q(filepath)
+    hdf5file = h5open(filepath)
+    X_tr, z_tr = read(hdf5file, "X_tr"), read(hdf5file, "z_vi_tr")
+    X_va, z_va = read(hdf5file, "X_va"), read(hdf5file, "z_vi_va")
+    X_te, z_te = read(hdf5file, "X_te"), read(hdf5file, "z_vi_te")
+    close(hdf5file)
+    z_tr[z_tr .< 0] .= 0    # z smaller than 0 should be zero
+    z_tr_categorical = cut(z_tr, EDGES, labels=STR_LABELS)
+    z_tr_onehot = Flux.onehotbatch(z_tr_categorical, STR_LABELS)
+    return X_tr, z_tr, z_tr_onehot, X_va, z_va, X_te, z_te
 end

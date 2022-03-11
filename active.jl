@@ -1,5 +1,3 @@
-using Random
-
 log2entropy(x) = x != 0.0 ? log2(x) : 0.0
 
 entropy(prob) = dropdims(-sum(prob .* log2entropy.(prob), dims=1), dims=1)
@@ -35,6 +33,8 @@ function oracle(model, X_query, index_query, round)
 end
 
 function simulate_al(query, labeller, model, X, y, X_test, y_test; n_round=30, n_query=10)
+    y_onehot = Flux.onehotbatch(y, 1:10)
+
     n = size(X, ndims(X))
     index_pool = Vector{Int64}(1:n)
     index_train = Vector{Int64}(undef, 0)
@@ -50,11 +50,22 @@ function simulate_al(query, labeller, model, X, y, X_test, y_test; n_round=30, n
         index_pool = setdiff(index_pool, index_label)
         # Fine-tune the active learner.
         # For other approaches see Prabhu et al. (2021) and Su et al. (2019).
-        finetune!(model, X[:, :, :, index_train], y[index_train])
+        finetune!(model, X[:, :, :, index_train], y_onehot[:, index_train])
         # Evaluate performance.
         accuracy_round = accuracy(y_test, predict(model, X_test))
-        @info "performance" round accuracy_round
+        println("round: ", round, " accuracy: ", accuracy_round)
         accuracies = vcat(accuracies, accuracy_round)
     end
     return 0:n_round, accuracies
+end
+
+function digits_al(sampling, constructor, params, file_csv; n_run=30, n_query=10)
+    X_tr, y_tr, X_te, y_te = prepare_mnist(get_mnist("data/mnist"))
+    df = DataFrames.DataFrame()
+    for run in 1:n_run
+        model = constructor(params...)
+        rounds, accuracies= simulate_al(sampling, oracle, model, X_tr, y_tr, X_te, y_te, n_query=n_query)
+        df = vcat(df, DataFrames.DataFrame(run=run, round=rounds, n_query=n_query, accuracy=accuracies))
+    end
+    CSV.write(file_csv, df)
 end
