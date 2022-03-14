@@ -53,3 +53,12 @@ function get_dr12q(filepath)
     z_tr_onehot = Flux.onehotbatch(z_tr_categorical, STR_LABELS)
     return X_tr, z_tr, z_tr_onehot, X_va, z_va, X_te, z_te
 end
+
+function get_dr16q(filepath)
+    hdf5file = h5open(filepath)
+    X = read(hdf5file, "X")
+    idx_10k = read(hdf5file, "idx_10k")
+    z_10k = read(hdf5file, "z_10k")
+    close(hdf5file)
+    return X[:, .~idx_10k], X[:, idx_10k], z_10k[idx_10k]
+end

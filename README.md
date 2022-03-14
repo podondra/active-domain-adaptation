@@ -26,6 +26,8 @@ Hypotheses:
 
 ## Deep active learning
 
+Noisy oracles (see Settles 2009).
+
 ## Active domain adapation
 
 It is important to query both 1. *uncertain* and 2. *diverse* data for labelling (probably Prabhu et al. 2021).
@@ -82,3 +84,8 @@ SVHN dataset is available online, at http://ufldl.stanford.edu/housenumbers/.
 Task:
 I will used a variant of SZNet to predict spectroscopic redshift.
 Training data (source domain) are spectra from the superset of SDSS data release (DR) 12 QSO catalogue.
+
+Entropy sampling:
+It selected only 2 spectra that we were able to label in the first query.
+It selected very noisy spectra with missing values in the second query.
+Therefore, we are wasting resources.

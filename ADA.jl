@@ -13,7 +13,7 @@ using Printf
 using Random
 using TensorBoardLogger
 
-export get_dr12q, get_mnist, get_svhn, prepare_mnist, prepare_svhn
+export get_dr12q, get_dr16q, get_mnist, get_svhn, prepare_mnist, prepare_svhn
 export train_valid_split
 
 export digits_al, simulate_al
