@@ -34,11 +34,11 @@ def get_superconductivity(datapath="data/superconduct/train.csv"):
 
 def domain_split(df, X, y, percentile_low, percentile_up):
     """Domain split inspired by Mathelin et al. (2022) and Pardoe & Stone (2010)."""
-    index = (percentile_low <= df[SPLIT_COLUMN]) & (df[SPLIT_COLUMN] < percentile_up)
+    index = (percentile_low < df[SPLIT_COLUMN]) & (df[SPLIT_COLUMN] <= percentile_up)
     return X[index], y[index]
 
 
-def test_split(X, y):
+def test_split(X, y, seed):
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=60)
     return (X_train, X_test), (y_train, y_test)
 
@@ -57,8 +57,8 @@ def get_datasets():
     percentiles = df[SPLIT_COLUMN].quantile([0.25, 0.75])
     domain_source = domain_split(df, X, y, -np.inf, percentiles[0.25])
     domain_target = domain_split(df, X, y, percentiles[0.75], np.inf)
-    Xs_source, ys_source = test_split(*domain_source)
-    Xs_target, ys_target = test_split(*domain_target)
+    Xs_source, ys_source = test_split(*domain_source, seed=60)
+    Xs_target, ys_target = test_split(*domain_target, seed=96)
     Xs, _ = data_preparation(Xs_source, Xs_target)
     ys, y_scaler = data_preparation(ys_source, ys_target)
     Xs, ys = map(array2gpu_tensor, Xs), map(array2gpu_tensor, ys)
@@ -68,6 +68,19 @@ def get_datasets():
 
 def get_y(dataset):
     return torch.concat([batch[-1] for batch in DataLoader(dataset, batch_size=BS)]).cpu()
+
+
+def nll(mean_pred, var_pred, y):
+    return torch.log(var_pred) + torch.square(y - mean_pred) / var_pred
+
+
+def crps(mean_pred, var_pred, y):
+    std_pred = torch.sqrt(var_pred)
+    y_std = (y - mean_pred) / std_pred
+    pi = torch.tensor(math.pi)
+    pdf = (1.0 / torch.sqrt(2.0 * pi)) * torch.exp(-torch.square(y_std) / 2.0)
+    cdf = 0.5 + 0.5 * torch.erf(y_std / torch.sqrt(torch.tensor(2.0)))
+    return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / torch.sqrt(pi))
 
 
 class Model(nn.Module):
@@ -85,8 +98,8 @@ class Model(nn.Module):
 
     def forward(self, X):
         output = self.model(X)
-        # TODO torch.exp(output[:, 1:])
-        return output[:, :1], F.softplus(output[:, 1:]) + 1e-6
+        # TODO return output[:, :1], F.softplus(output[:, 1:]) + 1e-6
+        return output[:, :1], torch.exp(output[:, 1:])
 
     @torch.no_grad()
     def predict(self, dataset):
@@ -96,7 +109,14 @@ class Model(nn.Module):
         return torch.concat(mean).cpu(), torch.concat(var).cpu()
 
     def test(self, testset):
-        return self.loss(self.predict(testset), get_y(testset)).item()
+        mean, var = self.predict(testset)
+        y = get_y(testset)
+        return {
+                "crps": torch.mean(crps(mean, var, y)).item(),
+                "mae": torch.mean(torch.abs(mean - y)).item(),
+                "nll": torch.mean(nll(mean, var, y)).item(),
+                "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
+                "sharpness": torch.mean(var).item()}
 
     def loss(self, y_pred, y):
         return torch.mean(self.loss_function(*y_pred, y))
@@ -110,32 +130,18 @@ class Model(nn.Module):
         return self
 
     def train_epochs(self, trainset, testset, hyperparams):
-        torch.manual_seed(1235)    # TODO seed from random.org
         optimiser = optim.Adam(self.parameters(), lr=hyperparams["lr"])
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
-        wandb.log({"loss_train": self.test(trainset), "loss_test": self.test(testset)})
+        wandb.log({"train": self.test(trainset), "test": self.test(testset)})
         for epoch in range(1, hyperparams["epochs"] + 1):
             self.train_epoch(trainloader, optimiser)
-            wandb.log({"loss_train": self.test(trainset), "loss_test": self.test(testset)})
+            wandb.log({"train": self.test(trainset), "test": self.test(testset)})
         return self
 
-    def save(self, modelname="model"):
+    def save(self, modelname):
         filepath = f"models/{modelname}.pt"
         torch.save(self.state_dict(), filepath)
         return self
-
-
-def nll(mean_pred, var_pred, y):
-    return torch.log(var_pred) + torch.square(y - mean_pred) / var_pred
-
-
-def crps(mean_pred, var_pred, y):
-    std_pred = torch.sqrt(var_pred)
-    y_std = (y - mean_pred) / std_pred
-    pi = torch.tensor(math.pi)
-    pdf = (1.0 / torch.sqrt(2.0 * pi)) * torch.exp(-torch.square(y_std) / 2.0)
-    cdf = 0.5 + 0.5 * torch.erf(y_std / torch.sqrt(torch.tensor(2.0)))
-    return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / torch.sqrt(pi))
 
 
 @click.command()
@@ -145,13 +151,17 @@ def crps(mean_pred, var_pred, y):
 @click.option("--lr", default=0.001, help="Learning rate.")
 @click.argument("loss")
 def train(**hyperparams):
+    # reproducibility
+    torch.manual_seed(1235)    # TODO seed from random.org
+    torch.backends.cudnn.benchmark = False
+    # get data
     datasets, y_scaler = get_datasets()
     trainset_source, testset_source, trainset_target, testset_target = datasets
-    with wandb.init(config=hyperparams, project="ada"):
+    with wandb.init(config=hyperparams):
         config = wandb.config
         model = Model(config)
         model = model.train_epochs(trainset_source, testset_source, config)
-        model = model.save()
+        model = model.save(modelname=wandb.run.name)
 
 
 if __name__ == "__main__":
