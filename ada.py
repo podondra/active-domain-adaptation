@@ -1,6 +1,7 @@
 from itertools import chain
 import math
 
+import click
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -10,13 +11,12 @@ from torch import nn
 from torch import optim
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
+import wandb
 
 
 BS = 2048   # batch size for testing
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-HYPERPARAMS = {"bs": 128, "lr": 0.001, "n_epochs": 1024}
 N_FEATURES = 80
-N_HIDDEN = 8
 SPLIT_COLUMN = "wtd_std_Valence"
 TARGET_COLUMN = "critical_temp"
 
@@ -71,15 +71,16 @@ def get_y(dataset):
 
 
 class Model(nn.Module):
-    def __init__(self, loss_function):
+    def __init__(self, hyperparams):
         super(Model, self).__init__()
-        self.loss_function = loss_function
+        self.loss_function = {"crps": crps, "nll": nll}[hyperparams["loss"]]
+        hiddens = hyperparams["hiddens"]
         self.model = nn.Sequential(
-            nn.Linear(N_FEATURES, N_HIDDEN),
+            nn.Linear(N_FEATURES, hiddens),
             nn.ReLU(),
-            nn.Linear(N_HIDDEN, N_HIDDEN // 2),
+            nn.Linear(hiddens, hiddens // 2),
             nn.ReLU(),
-            nn.Linear(N_HIDDEN // 2, 2))    # mean and variance
+            nn.Linear(hiddens // 2, 2))    # mean and variance
         self.to(DEVICE)
 
     def forward(self, X):
@@ -95,7 +96,7 @@ class Model(nn.Module):
         return torch.concat(mean).cpu(), torch.concat(var).cpu()
 
     def test(self, testset):
-        return self.loss(self.predict(testset), get_y(testset))
+        return self.loss(self.predict(testset), get_y(testset)).item()
 
     def loss(self, y_pred, y):
         return torch.mean(self.loss_function(*y_pred, y))
@@ -109,19 +110,13 @@ class Model(nn.Module):
         return self
 
     def train_epochs(self, trainset, testset, hyperparams):
-        torch.manual_seed(22)    # TODO previous 1235
+        torch.manual_seed(1235)    # TODO seed from random.org
         optimiser = optim.Adam(self.parameters(), lr=hyperparams["lr"])
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
-        # TODO w&b
-        losses_train = torch.zeros(hyperparams["n_epochs"] + 1)
-        losses_test = torch.zeros(hyperparams["n_epochs"] + 1)
-        losses_train[0] = self.test(trainset)
-        losses_test[0] = self.test(testset)
-        for epoch in range(1, hyperparams["n_epochs"] + 1):
+        wandb.log({"loss_train": self.test(trainset), "loss_test": self.test(testset)})
+        for epoch in range(1, hyperparams["epochs"] + 1):
             self.train_epoch(trainloader, optimiser)
-            losses_train[epoch] = self.test(trainset)
-            losses_test[epoch] = self.test(testset)
-            print(epoch, losses_train[epoch].item(), losses_test[epoch].item())
+            wandb.log({"loss_train": self.test(trainset), "loss_test": self.test(testset)})
         return self
 
     def save(self, modelname="model"):
@@ -143,9 +138,21 @@ def crps(mean_pred, var_pred, y):
     return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / torch.sqrt(pi))
 
 
-if __name__ == "__main__":
+@click.command()
+@click.option("--bs", default=128, help="Batch size.")
+@click.option("--epochs", default=1024, help="Number of epochs.")
+@click.option("--hiddens", default=8, help="Number of neurons in the first hidden layer.")
+@click.option("--lr", default=0.001, help="Learning rate.")
+@click.argument("loss")
+def train(**hyperparams):
     datasets, y_scaler = get_datasets()
     trainset_source, testset_source, trainset_target, testset_target = datasets
-    model = Model(nll)
-    model = model.train_epochs(trainset_source, testset_source, HYPERPARAMS)
-    model = model.save()
+    with wandb.init(config=hyperparams, project="ada"):
+        config = wandb.config
+        model = Model(config)
+        model = model.train_epochs(trainset_source, testset_source, config)
+        model = model.save()
+
+
+if __name__ == "__main__":
+    train()
