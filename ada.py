@@ -17,6 +17,7 @@ import wandb
 
 BS = 2048   # batch size for testing
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MODELPATH = "models/{}.pt"
 N_FEATURES = 80
 SPLIT_COLUMN = "wtd_std_Valence"
 TARGET_COLUMN = "critical_temp"
@@ -97,19 +98,19 @@ class Model(nn.Module):
     def __init__(self, hyperparams):
         super(Model, self).__init__()
         self.loss_function = {"crps": crps, "nll": nll}[hyperparams["loss"]]
-        hiddens = hyperparams["hiddens"]
-        self.model = nn.Sequential(
-            nn.Linear(N_FEATURES, hiddens),
+        neurons = hyperparams["neurons"]
+        self.model_mean = nn.Sequential(
+            nn.Linear(N_FEATURES, neurons),
             nn.ReLU(),
-            nn.Linear(hiddens, hiddens // 2),
+            nn.Linear(neurons, 1))    # mean and variance
+        self.model_var = nn.Sequential(
+            nn.Linear(N_FEATURES, neurons),
             nn.ReLU(),
-            nn.Linear(hiddens // 2, 2))    # mean and variance
+            nn.Linear(neurons, 1))    # mean and variance
         self.to(DEVICE)
 
     def forward(self, X):
-        output = self.model(X)
-        return output[:, :1], F.softplus(output[:, 1:]) + 1e-6
-        #return output[:, :1], torch.exp(output[:, 1:])
+        return self.model_mean(X), F.softplus(self.model_var(X)) + 1e-6
 
     @torch.no_grad()
     def predict(self, dataset):
@@ -117,11 +118,6 @@ class Model(nn.Module):
         output = [self(batch[0]) for batch in DataLoader(dataset, batch_size=BS)]
         mean, var = tuple(zip(*output))
         return torch.concat(mean).cpu(), torch.concat(var).cpu()
-
-    def test(self, testset):
-        mean, var = self.predict(testset)
-        y = get_y(testset)
-        return metrics(mean, var, y)
 
     def loss(self, y_pred, y):
         return torch.mean(self.loss_function(*y_pred, y))
@@ -138,7 +134,6 @@ class Model(nn.Module):
         optimiser = Adam(self.parameters(), lr=hyperparams["lr"], weight_decay=hyperparams["wd"])
         scheduler = StepLR(optimiser, step_size=hyperparams["step"], gamma=hyperparams["gamma"])
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
-        wandb.log({"train": self.test(trainset), "test": self.test(testset)})
         for epoch in range(1, hyperparams["epochs"] + 1):
             self.train_epoch(trainloader, optimiser)
             mean_train, var_train = self.predict(trainset)
@@ -151,9 +146,47 @@ class Model(nn.Module):
             scheduler.step()
         return self
 
-    def save(self, modelname):
-        filepath = f"models/{modelname}.pt"
-        torch.save(self.state_dict(), filepath)
+    def save(self, modelpath):
+        torch.save(self.state_dict(), modelpath)
+
+    def load(self, modelpath):
+        self.load_state_dict(torch.load(modelpath))
+        return self
+
+
+class DeepEnsemble:
+    def __init__(self, hyperparams):
+        self.models = [Model(hyperparams) for _ in range(hyperparams["m"])]
+
+    @torch.no_grad()
+    def predict(self, dataset):
+        outputs = [model.predict(dataset) for model in self.models]
+        means, variances = tuple(zip(*outputs))
+        means = torch.concat(means, dim=1)
+        variances = torch.concat(variances, dim=1)
+        mean = torch.mean(means, dim=1, keepdim=True)
+        # TODO why is this correct?
+        var = torch.mean(variances + torch.square(means), dim=1, keepdim=True) - torch.square(mean)
+        return mean, var
+
+    def train_epochs(self, trainset, testset, hyperparams):
+        optimisers = [
+                Adam(model.parameters(), lr=hyperparams["lr"], weight_decay=hyperparams["wd"])
+                for model in self.models]
+        schedulers = [StepLR(optimiser, step_size=hyperparams["step"], gamma=hyperparams["gamma"])
+                for optimiser in optimisers]
+        trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
+        for epoch in range(1, hyperparams["epochs"] + 1):
+            for model, optimiser, scheduler in zip(self.models, optimisers, schedulers):
+                model.train_epoch(trainloader, optimiser)
+                mean_train, var_train = self.predict(trainset)
+                mean_test, var_test = self.predict(testset)
+                wandb.log({
+                    "train": metrics(mean_train, var_train, get_y(trainset)),
+                    "test": metrics(mean_test, var_test, get_y(testset)),
+                    "var_train": wandb.Histogram(var_train),
+                    "var_test": wandb.Histogram(var_test)})
+                scheduler.step()
         return self
 
 
@@ -161,12 +194,14 @@ class Model(nn.Module):
 @click.option("--bs", default=128, help="Batch size.")
 @click.option("--epochs", default=1024, help="Number of epochs.")
 @click.option("--gamma", default=1.0, help="Multiplicative factor of learning rate decay.")
-@click.option("--hiddens", default=8, help="Number of neurons in the first hidden layer.")
-@click.option("--load", type=click.Path(exists=True, dir_okay=False))
+@click.option("--neurons", default=8, help="Number of neurons in the first hidden layer.")
+@click.option("--m", default=5, help="Number of model in the ensemble.")
+@click.option("--modelpath", type=click.Path(exists=True, dir_okay=False))
+@click.option("--loss", required=True, help="Loss function.")
 @click.option("--lr", default=0.001, help="Learning rate.")
 @click.option("--step", default=256, help="Period of learning rate decay.")
-@click.option("--wd", default=0, help="Weight decay.")
-@click.argument("loss")
+@click.option("--wd", default=0.0, help="Weight decay.")
+# TODO implement train model and train ensemble as subcommands
 def train(**hyperparams):
     # reproducibility
     torch.manual_seed(53)
@@ -176,11 +211,12 @@ def train(**hyperparams):
     trainset_source, testset_source, trainset_target, testset_target = datasets
     with wandb.init(config=hyperparams):
         config = wandb.config
-        model = Model(config)
-        if hyperparams["load"] is not None:
-            model.load_state_dict(torch.load(hyperparams["load"]))
+        # TODO model = Model(config)
+        model = DeepEnsemble(config)
+        if hyperparams["modelpath"] is not None:
+            model.load(hyperparams["modelpath"])
         model.train_epochs(trainset_source, testset_source, config)
-        model.save(modelname=wandb.run.name)
+        # TODO model.save(MODELPATH.format(wandb.run.name))
 
 
 if __name__ == "__main__":
