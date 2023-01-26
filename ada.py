@@ -8,7 +8,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import torch
 from torch import nn
-from torch import optim
+from torch.optim import Adam
+from torch.optim.lr_scheduler import StepLR
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import wandb
@@ -83,6 +84,15 @@ def crps(mean_pred, var_pred, y):
     return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / torch.sqrt(pi))
 
 
+def metrics(mean, var, y):
+    return {
+            "crps": torch.mean(crps(mean, var, y)).item(),
+            "mae": torch.mean(torch.abs(mean - y)).item(),
+            "nll": torch.mean(nll(mean, var, y)).item(),
+            "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
+            "sharpness": torch.mean(var).item()}
+
+
 class Model(nn.Module):
     def __init__(self, hyperparams):
         super(Model, self).__init__()
@@ -98,8 +108,8 @@ class Model(nn.Module):
 
     def forward(self, X):
         output = self.model(X)
-        # TODO return output[:, :1], F.softplus(output[:, 1:]) + 1e-6
-        return output[:, :1], torch.exp(output[:, 1:])
+        return output[:, :1], F.softplus(output[:, 1:]) + 1e-6
+        #return output[:, :1], torch.exp(output[:, 1:])
 
     @torch.no_grad()
     def predict(self, dataset):
@@ -111,12 +121,7 @@ class Model(nn.Module):
     def test(self, testset):
         mean, var = self.predict(testset)
         y = get_y(testset)
-        return {
-                "crps": torch.mean(crps(mean, var, y)).item(),
-                "mae": torch.mean(torch.abs(mean - y)).item(),
-                "nll": torch.mean(nll(mean, var, y)).item(),
-                "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
-                "sharpness": torch.mean(var).item()}
+        return metrics(mean, var, y)
 
     def loss(self, y_pred, y):
         return torch.mean(self.loss_function(*y_pred, y))
@@ -130,12 +135,20 @@ class Model(nn.Module):
         return self
 
     def train_epochs(self, trainset, testset, hyperparams):
-        optimiser = optim.Adam(self.parameters(), lr=hyperparams["lr"])
+        optimiser = Adam(self.parameters(), lr=hyperparams["lr"], weight_decay=hyperparams["wd"])
+        scheduler = StepLR(optimiser, step_size=hyperparams["step"], gamma=hyperparams["gamma"])
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
         wandb.log({"train": self.test(trainset), "test": self.test(testset)})
         for epoch in range(1, hyperparams["epochs"] + 1):
             self.train_epoch(trainloader, optimiser)
-            wandb.log({"train": self.test(trainset), "test": self.test(testset)})
+            mean_train, var_train = self.predict(trainset)
+            mean_test, var_test = self.predict(testset)
+            wandb.log({
+                "train": metrics(mean_train, var_train, get_y(trainset)),
+                "test": metrics(mean_test, var_test, get_y(testset)),
+                "var_train": wandb.Histogram(var_train),
+                "var_test": wandb.Histogram(var_test)})
+            scheduler.step()
         return self
 
     def save(self, modelname):
@@ -147,12 +160,16 @@ class Model(nn.Module):
 @click.command()
 @click.option("--bs", default=128, help="Batch size.")
 @click.option("--epochs", default=1024, help="Number of epochs.")
+@click.option("--gamma", default=1.0, help="Multiplicative factor of learning rate decay.")
 @click.option("--hiddens", default=8, help="Number of neurons in the first hidden layer.")
+@click.option("--load", type=click.Path(exists=True, dir_okay=False))
 @click.option("--lr", default=0.001, help="Learning rate.")
+@click.option("--step", default=256, help="Period of learning rate decay.")
+@click.option("--wd", default=0, help="Weight decay.")
 @click.argument("loss")
 def train(**hyperparams):
     # reproducibility
-    torch.manual_seed(1235)    # TODO seed from random.org
+    torch.manual_seed(53)
     torch.backends.cudnn.benchmark = False
     # get data
     datasets, y_scaler = get_datasets()
@@ -160,8 +177,10 @@ def train(**hyperparams):
     with wandb.init(config=hyperparams):
         config = wandb.config
         model = Model(config)
-        model = model.train_epochs(trainset_source, testset_source, config)
-        model = model.save(modelname=wandb.run.name)
+        if hyperparams["load"] is not None:
+            model.load_state_dict(torch.load(hyperparams["load"]))
+        model.train_epochs(trainset_source, testset_source, config)
+        model.save(modelname=wandb.run.name)
 
 
 if __name__ == "__main__":
