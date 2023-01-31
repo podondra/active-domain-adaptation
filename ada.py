@@ -1,5 +1,6 @@
 from itertools import chain
 import math
+from random import randint
 
 import click
 import numpy as np
@@ -18,6 +19,7 @@ import wandb
 BS = 2048   # batch size for testing
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODELPATH = "models/{}.pt"
+ENSEMBLEPATH = "models/{}-{}.pt"
 N_FEATURES = 80
 SPLIT_COLUMN = "wtd_std_Valence"
 TARGET_COLUMN = "critical_temp"
@@ -136,6 +138,7 @@ class Model(nn.Module):
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
         for epoch in range(1, hyperparams["epochs"] + 1):
             self.train_epoch(trainloader, optimiser)
+            scheduler.step()
             mean_train, var_train = self.predict(trainset)
             mean_test, var_test = self.predict(testset)
             wandb.log({
@@ -143,15 +146,13 @@ class Model(nn.Module):
                 "test": metrics(mean_test, var_test, get_y(testset)),
                 "var_train": wandb.Histogram(var_train),
                 "var_test": wandb.Histogram(var_test)})
-            scheduler.step()
         return self
 
-    def save(self, modelpath):
-        torch.save(self.state_dict(), modelpath)
+    def load(self, modelname):
+        self.load_state_dict(torch.load(MODELPATH.format(modelname)))
 
-    def load(self, modelpath):
-        self.load_state_dict(torch.load(modelpath))
-        return self
+    def save(self, modelname):
+        torch.save(self.state_dict(), MODELPATH.format(modelname))
 
 
 class DeepEnsemble:
@@ -165,7 +166,6 @@ class DeepEnsemble:
         means = torch.concat(means, dim=1)
         variances = torch.concat(variances, dim=1)
         mean = torch.mean(means, dim=1, keepdim=True)
-        # TODO why is this correct?
         var = torch.mean(variances + torch.square(means), dim=1, keepdim=True) - torch.square(mean)
         return mean, var
 
@@ -179,15 +179,23 @@ class DeepEnsemble:
         for epoch in range(1, hyperparams["epochs"] + 1):
             for model, optimiser, scheduler in zip(self.models, optimisers, schedulers):
                 model.train_epoch(trainloader, optimiser)
-                mean_train, var_train = self.predict(trainset)
-                mean_test, var_test = self.predict(testset)
-                wandb.log({
-                    "train": metrics(mean_train, var_train, get_y(trainset)),
-                    "test": metrics(mean_test, var_test, get_y(testset)),
-                    "var_train": wandb.Histogram(var_train),
-                    "var_test": wandb.Histogram(var_test)})
                 scheduler.step()
+            mean_train, var_train = self.predict(trainset)
+            mean_test, var_test = self.predict(testset)
+            wandb.log({
+                "train": metrics(mean_train, var_train, get_y(trainset)),
+                "test": metrics(mean_test, var_test, get_y(testset)),
+                "var_train": wandb.Histogram(var_train),
+                "var_test": wandb.Histogram(var_test)})
         return self
+
+    def load(self, modelname):
+        for i, model in enumerate(self.models):
+            self.load_state_dict(torch.load(ENSEMBLEPATH.format(modelname, i)))
+
+    def save(self, modelname):
+        for i, model in enumerate(self.models):
+            torch.save(model.state_dict(), ENSEMBLEPATH.format(modelname, i))
 
 
 @click.command()
@@ -195,13 +203,12 @@ class DeepEnsemble:
 @click.option("--epochs", default=1024, help="Number of epochs.")
 @click.option("--gamma", default=1.0, help="Multiplicative factor of learning rate decay.")
 @click.option("--neurons", default=8, help="Number of neurons in the first hidden layer.")
-@click.option("--m", default=5, help="Number of model in the ensemble.")
-@click.option("--modelpath", type=click.Path(exists=True, dir_okay=False))
+@click.option("--m", default=1, help="Number of model in deep ensemble.")
+@click.option("--modelname", type=click.Path(exists=True, dir_okay=False))
 @click.option("--loss", required=True, help="Loss function.")
 @click.option("--lr", default=0.001, help="Learning rate.")
 @click.option("--step", default=256, help="Period of learning rate decay.")
 @click.option("--wd", default=0.0, help="Weight decay.")
-# TODO implement train model and train ensemble as subcommands
 def train(**hyperparams):
     # reproducibility
     torch.manual_seed(53)
@@ -209,14 +216,15 @@ def train(**hyperparams):
     # get data
     datasets, y_scaler = get_datasets()
     trainset_source, testset_source, trainset_target, testset_target = datasets
-    with wandb.init(config=hyperparams):
+    # generate random run name with loss information
+    runname = "{}-{}-{}".format(hyperparams["loss"], hyperparams["m"], randint(1000, 9999))
+    with wandb.init(config=hyperparams, name=runname):
         config = wandb.config
-        # TODO model = Model(config)
-        model = DeepEnsemble(config)
-        if hyperparams["modelpath"] is not None:
-            model.load(hyperparams["modelpath"])
+        model = Model(config) if config["m"] == 1 else DeepEnsemble(config)
+        if config["modelname"] is not None:
+            model.load(config["modelname"])
         model.train_epochs(trainset_source, testset_source, config)
-        # TODO model.save(MODELPATH.format(wandb.run.name))
+        model.save(runname)
 
 
 if __name__ == "__main__":
