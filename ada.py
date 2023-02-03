@@ -5,6 +5,7 @@ from random import randint
 import click
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 import torch
@@ -18,6 +19,7 @@ import wandb
 
 BS = 2048   # batch size for testing
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+EPS = 1e-6
 MODELPATH = "models/{}.pt"
 ENSEMBLEPATH = "models/{}-{}.pt"
 N_FEATURES = 80
@@ -75,44 +77,60 @@ def get_y(dataset):
 
 
 def nll(mean_pred, var_pred, y):
-    return torch.log(var_pred) + torch.square(y - mean_pred) / var_pred
+    return F.gaussian_nll_loss(mean_pred, y, var_pred, eps=EPS, full=True, reduction="none")
 
 
 def crps(mean_pred, var_pred, y):
+    # clamp for stability: https://pytorch.org/docs/stable/_modules/torch/nn/functional.html#gaussian_nll_loss
+    var_pred = var_pred.clone()  # not to modify the original var
+    with torch.no_grad():
+        var_pred.clamp_(min=EPS)
     std_pred = torch.sqrt(var_pred)
     y_std = (y - mean_pred) / std_pred
-    pi = torch.tensor(math.pi)
-    pdf = (1.0 / torch.sqrt(2.0 * pi)) * torch.exp(-torch.square(y_std) / 2.0)
-    cdf = 0.5 + 0.5 * torch.erf(y_std / torch.sqrt(torch.tensor(2.0)))
-    return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / torch.sqrt(pi))
+    cdf = 0.5 + 0.5 * torch.erf(y_std / math.sqrt(2.0))
+    pdf = (1.0 / math.sqrt(2.0 * math.pi)) * torch.exp(-0.5 * y_std ** 2)
+    return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / math.sqrt(math.pi))
 
 
-def metrics(mean, var, y):
+def se(mean_pred, var_pred, y):
+    return (y - mean_pred) ** 2
+
+
+def pit(mean_pred, var_pred, y):
+    return norm.cdf(y, loc=mean_pred, scale=torch.sqrt(var_pred))
+
+
+def metrics(mean, var, y, y_scaler):
+    mean = torch.from_numpy(y_scaler.inverse_transform(mean))
+    var = torch.from_numpy(y_scaler.var_) * var
+    y = torch.from_numpy(y_scaler.inverse_transform(y))
     return {
             "crps": torch.mean(crps(mean, var, y)).item(),
             "mae": torch.mean(torch.abs(mean - y)).item(),
             "nll": torch.mean(nll(mean, var, y)).item(),
+            "pit": wandb.Histogram(pit(mean, var, y)),
             "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
-            "sharpness": torch.mean(var).item()}
+            "sharpness": torch.mean(var).item(),
+            "var": wandb.Histogram(var)}
 
 
 class Model(nn.Module):
     def __init__(self, hyperparams):
         super(Model, self).__init__()
-        self.loss_function = {"crps": crps, "nll": nll}[hyperparams["loss"]]
+        self.loss_function = {"crps": crps, "nll": nll, "se": se}[hyperparams["loss"]]
         neurons = hyperparams["neurons"]
         self.model_mean = nn.Sequential(
             nn.Linear(N_FEATURES, neurons),
             nn.ReLU(),
-            nn.Linear(neurons, 1))    # mean and variance
+            nn.Linear(neurons, 1))
         self.model_var = nn.Sequential(
             nn.Linear(N_FEATURES, neurons),
             nn.ReLU(),
-            nn.Linear(neurons, 1))    # mean and variance
+            nn.Linear(neurons, 1))
         self.to(DEVICE)
 
     def forward(self, X):
-        return self.model_mean(X), F.softplus(self.model_var(X)) + 1e-6
+        return self.model_mean(X), F.softplus(self.model_var(X))
 
     @torch.no_grad()
     def predict(self, dataset):
@@ -132,20 +150,16 @@ class Model(nn.Module):
             optimiser.step()
         return self
 
-    def train_epochs(self, trainset, testset, hyperparams):
+    def train_epochs(self, trainset, testset, hyperparams, y_scaler):
         optimiser = Adam(self.parameters(), lr=hyperparams["lr"], weight_decay=hyperparams["wd"])
         scheduler = StepLR(optimiser, step_size=hyperparams["step"], gamma=hyperparams["gamma"])
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
         for epoch in range(1, hyperparams["epochs"] + 1):
             self.train_epoch(trainloader, optimiser)
             scheduler.step()
-            mean_train, var_train = self.predict(trainset)
-            mean_test, var_test = self.predict(testset)
             wandb.log({
-                "train": metrics(mean_train, var_train, get_y(trainset)),
-                "test": metrics(mean_test, var_test, get_y(testset)),
-                "var_train": wandb.Histogram(var_train),
-                "var_test": wandb.Histogram(var_test)})
+                "train": metrics(*self.predict(trainset), get_y(trainset), y_scaler),
+                "test": metrics(*self.predict(testset), get_y(testset), y_scaler)})
         return self
 
     def load(self, modelname):
@@ -169,7 +183,7 @@ class DeepEnsemble:
         var = torch.mean(variances + torch.square(means), dim=1, keepdim=True) - torch.square(mean)
         return mean, var
 
-    def train_epochs(self, trainset, testset, hyperparams):
+    def train_epochs(self, trainset, testset, hyperparams, y_scaler):
         optimisers = [
                 Adam(model.parameters(), lr=hyperparams["lr"], weight_decay=hyperparams["wd"])
                 for model in self.models]
@@ -180,13 +194,9 @@ class DeepEnsemble:
             for model, optimiser, scheduler in zip(self.models, optimisers, schedulers):
                 model.train_epoch(trainloader, optimiser)
                 scheduler.step()
-            mean_train, var_train = self.predict(trainset)
-            mean_test, var_test = self.predict(testset)
             wandb.log({
-                "train": metrics(mean_train, var_train, get_y(trainset)),
-                "test": metrics(mean_test, var_test, get_y(testset)),
-                "var_train": wandb.Histogram(var_train),
-                "var_test": wandb.Histogram(var_test)})
+                "train": metrics(*self.predict(trainset), get_y(trainset), y_scaler),
+                "test": metrics(*self.predict(testset), get_y(testset), y_scaler)})
         return self
 
     def load(self, modelname):
@@ -215,7 +225,7 @@ def train(**hyperparams):
     torch.backends.cudnn.benchmark = False
     # get data
     datasets, y_scaler = get_datasets()
-    trainset_source, testset_source, trainset_target, testset_target = datasets
+    trainset_source, testset_source, _, _ = datasets
     # generate random run name with loss information
     runname = "{}-{}-{}".format(hyperparams["loss"], hyperparams["m"], randint(1000, 9999))
     with wandb.init(config=hyperparams, name=runname):
@@ -223,7 +233,7 @@ def train(**hyperparams):
         model = Model(config) if config["m"] == 1 else DeepEnsemble(config)
         if config["modelname"] is not None:
             model.load(config["modelname"])
-        model.train_epochs(trainset_source, testset_source, config)
+        model.train_epochs(trainset_source, testset_source, config, y_scaler)
         model.save(runname)
 
 
