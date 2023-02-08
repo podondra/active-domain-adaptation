@@ -1,4 +1,3 @@
-from itertools import chain
 import math
 from random import randint
 
@@ -22,9 +21,13 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 EPS = 1e-6
 MODELPATH = "models/{}.pt"
 ENSEMBLEPATH = "models/{}-{}.pt"
-N_FEATURES = 80
 SPLIT_COLUMN = "wtd_std_Valence"
 TARGET_COLUMN = "critical_temp"
+
+
+def get_protein(datapath="data/CASP.csv"):
+    df = pd.read_csv(datapath, dtype=np.float32)
+    return df, df.values[:, 1:], df.values[:, :1]
 
 
 def get_superconductivity(datapath="data/superconduct/train.csv"):
@@ -38,24 +41,54 @@ def get_superconductivity(datapath="data/superconduct/train.csv"):
     return df, X, y
 
 
+def get_wine(datapath="data/winequality-red.csv"):
+    df = pd.read_csv(datapath, dtype=np.float32, sep=";")
+    return df, df.values[:, :11], df.values[:, 11:]
+
+
+# TODO You should respect the following train / test split:
+# train: first 463,715 examples
+# test: last 51,630 examples
+# It avoids the 'producer effect' by making sure no song
+# from a given artist ends up in both the train and test set.
+def get_year(datapath="data/YearPredictionMSD.txt"):
+    df = pd.read_csv(datapath, dtype=np.float32, header=None)
+    return df, df.values[:, 1:], df.values[:, :1]
+
+
+DATASETS = {
+        "protein": get_protein,
+        "wine": get_wine,
+        "superconductivity": get_superconductivity,
+        "year": get_year}
+
+
 def domain_split(df, X, y, percentile_low, percentile_up):
     """Domain split inspired by Mathelin et al. (2022) and Pardoe & Stone (2010)."""
     index = (percentile_low < df[SPLIT_COLUMN]) & (df[SPLIT_COLUMN] <= percentile_up)
     return X[index], y[index]
 
 
-def test_split(X, y, seed):
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=60)
+def test_split(X, y, test_size, seed):
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, random_state=seed)
     return (X_train, X_test), (y_train, y_test)
 
 
-def data_preparation(arrays_source, arrays_target):
-    scaler = StandardScaler().fit(arrays_source[0])   # fit on source train
-    return map(scaler.transform, chain(arrays_source, arrays_target)), scaler
+def data_preparation(arrays):
+    scaler = StandardScaler().fit(arrays[0])   # fit on (source) train
+    return map(scaler.transform, arrays), scaler
 
 
-def array2gpu_tensor(array):
+def numpy2torch(array):
     return torch.from_numpy(array.astype(np.float32)).to(DEVICE)
+
+def get_dataset(dataname, seed):
+    df, X, y = DATASETS[dataname]()
+    Xs, ys = test_split(X, y, 0.1, seed)
+    Xs, _ = data_preparation(Xs)
+    ys, y_scaler = data_preparation(ys)
+    datasets = map(TensorDataset, map(numpy2torch, Xs), map(numpy2torch, ys))
+    return tuple(datasets), y_scaler
 
 
 def get_datasets():
@@ -63,12 +96,11 @@ def get_datasets():
     percentiles = df[SPLIT_COLUMN].quantile([0.25, 0.75])
     domain_source = domain_split(df, X, y, -np.inf, percentiles[0.25])
     domain_target = domain_split(df, X, y, percentiles[0.75], np.inf)
-    Xs_source, ys_source = test_split(*domain_source, seed=60)
-    Xs_target, ys_target = test_split(*domain_target, seed=96)
-    Xs, _ = data_preparation(Xs_source, Xs_target)
-    ys, y_scaler = data_preparation(ys_source, ys_target)
-    Xs, ys = map(array2gpu_tensor, Xs), map(array2gpu_tensor, ys)
-    datasets = map(TensorDataset, Xs, ys)
+    Xs_source, ys_source = test_split(*domain_source, 0.2, seed=60)
+    Xs_target, ys_target = test_split(*domain_target, 0.2, seed=96)
+    Xs, _ = data_preparation(Xs_source + Xs_target)    # "+" chains tuples
+    ys, y_scaler = data_preparation(ys_source + ys_target)
+    datasets = map(TensorDataset, map(numpy2torch, Xs), map(numpy2torch, ys))
     return tuple(datasets), y_scaler
 
 
@@ -114,17 +146,23 @@ def metrics(mean, var, y, y_scaler):
             "var": wandb.Histogram(var)}
 
 
+def log(model, trainset, testset, y_scaler):
+    wandb.log({
+        "train": metrics(*model.predict(trainset), get_y(trainset), y_scaler),
+        "test": metrics(*model.predict(testset), get_y(testset), y_scaler)})
+
+
 class Model(nn.Module):
-    def __init__(self, hyperparams):
+    def __init__(self, features, hyperparams):
         super(Model, self).__init__()
         self.loss_function = {"crps": crps, "nll": nll, "se": se}[hyperparams["loss"]]
         neurons = hyperparams["neurons"]
         self.model_mean = nn.Sequential(
-            nn.Linear(N_FEATURES, neurons),
+            nn.Linear(features, neurons),
             nn.ReLU(),
             nn.Linear(neurons, 1))
         self.model_var = nn.Sequential(
-            nn.Linear(N_FEATURES, neurons),
+            nn.Linear(features, neurons),
             nn.ReLU(),
             nn.Linear(neurons, 1))
         self.to(DEVICE)
@@ -154,12 +192,11 @@ class Model(nn.Module):
         optimiser = Adam(self.parameters(), lr=hyperparams["lr"], weight_decay=hyperparams["wd"])
         scheduler = StepLR(optimiser, step_size=hyperparams["step"], gamma=hyperparams["gamma"])
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
+        log(self, trainset, testset, y_scaler)
         for epoch in range(1, hyperparams["epochs"] + 1):
             self.train_epoch(trainloader, optimiser)
             scheduler.step()
-            wandb.log({
-                "train": metrics(*self.predict(trainset), get_y(trainset), y_scaler),
-                "test": metrics(*self.predict(testset), get_y(testset), y_scaler)})
+            log(self, trainset, testset, y_scaler)
         return self
 
     def load(self, modelname):
@@ -170,8 +207,8 @@ class Model(nn.Module):
 
 
 class DeepEnsemble:
-    def __init__(self, hyperparams):
-        self.models = [Model(hyperparams) for _ in range(hyperparams["m"])]
+    def __init__(self, features, hyperparams):
+        self.models = [Model(features, hyperparams) for _ in range(hyperparams["m"])]
 
     @torch.no_grad()
     def predict(self, dataset):
@@ -190,18 +227,17 @@ class DeepEnsemble:
         schedulers = [StepLR(optimiser, step_size=hyperparams["step"], gamma=hyperparams["gamma"])
                 for optimiser in optimisers]
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
+        log(self, trainset, testset, y_scaler)
         for epoch in range(1, hyperparams["epochs"] + 1):
             for model, optimiser, scheduler in zip(self.models, optimisers, schedulers):
                 model.train_epoch(trainloader, optimiser)
                 scheduler.step()
-            wandb.log({
-                "train": metrics(*self.predict(trainset), get_y(trainset), y_scaler),
-                "test": metrics(*self.predict(testset), get_y(testset), y_scaler)})
+            log(self, trainset, testset, y_scaler)
         return self
 
     def load(self, modelname):
         for i, model in enumerate(self.models):
-            self.load_state_dict(torch.load(ENSEMBLEPATH.format(modelname, i)))
+            model.load_state_dict(torch.load(ENSEMBLEPATH.format(modelname, i)))
 
     def save(self, modelname):
         for i, model in enumerate(self.models):
@@ -209,31 +245,35 @@ class DeepEnsemble:
 
 
 @click.command()
-@click.option("--bs", default=128, help="Batch size.")
-@click.option("--epochs", default=1024, help="Number of epochs.")
+@click.option("--bs", default=100, help="Batch size.")
+@click.option("--dataname", required=True, help="Data set name.")
+@click.option("--epochs", default=40, help="Number of epochs.")
 @click.option("--gamma", default=1.0, help="Multiplicative factor of learning rate decay.")
-@click.option("--neurons", default=8, help="Number of neurons in the first hidden layer.")
+@click.option("--loss", required=True, help="Loss function.")
+@click.option("--lr", default=0.1, help="Learning rate.")
+@click.option("--neurons", default=50, help="Number of neurons in the first hidden layer.")
 @click.option("--m", default=1, help="Number of model in deep ensemble.")
 @click.option("--modelname", type=click.Path(exists=True, dir_okay=False))
-@click.option("--loss", required=True, help="Loss function.")
-@click.option("--lr", default=0.001, help="Learning rate.")
+@click.option("--seed", default=50, help="Seed for train and test set split.")
 @click.option("--step", default=256, help="Period of learning rate decay.")
 @click.option("--wd", default=0.0, help="Weight decay.")
 def train(**hyperparams):
     # reproducibility
     torch.manual_seed(53)
     torch.backends.cudnn.benchmark = False
-    # get data
-    datasets, y_scaler = get_datasets()
-    trainset_source, testset_source, _, _ = datasets
+    # TODO domain adaption setting
+    # datasets, y_scaler = get_datasets()
+    # trainset_source, testset_source, _, _ = datasets
+    (trainset, testset), y_scaler = get_dataset(hyperparams["dataname"], hyperparams["seed"])
+    features = trainset.tensors[0].shape[1]
     # generate random run name with loss information
     runname = "{}-{}-{}".format(hyperparams["loss"], hyperparams["m"], randint(1000, 9999))
-    with wandb.init(config=hyperparams, name=runname):
+    with wandb.init(config=hyperparams, name=runname, project="uci"):
         config = wandb.config
-        model = Model(config) if config["m"] == 1 else DeepEnsemble(config)
+        model = Model(features, config) if config["m"] == 1 else DeepEnsemble(features, config)
         if config["modelname"] is not None:
             model.load(config["modelname"])
-        model.train_epochs(trainset_source, testset_source, config, y_scaler)
+        model.train_epochs(trainset, testset, config, y_scaler)
         model.save(runname)
 
 
