@@ -25,6 +25,22 @@ SPLIT_COLUMN = "wtd_std_Valence"
 TARGET_COLUMN = "critical_temp"
 
 
+def f(x):
+    return x + 0.3 * torch.sin(2 * math.pi * x)
+
+
+def get_forward(n=1000):
+    torch.manual_seed(13)
+    x = torch.empty(n, 1).uniform_(0.0, 1.0)
+    y = f(x) + torch.empty(n, 1).normal_(std=0.1)
+    return None, x, y
+
+
+def get_inverse(n=1000):
+    _, x, y = get_forward(n)
+    return None, y, x
+
+
 def get_protein(datapath="data/CASP.csv"):
     df = pd.read_csv(datapath, dtype=np.float32)
     return df, df.values[:, 1:], df.values[:, :1]
@@ -57,6 +73,8 @@ def get_year(datapath="data/YearPredictionMSD.txt"):
 
 
 DATASETS = {
+        "forward": get_forward,
+        "inverse": get_inverse,
         "protein": get_protein,
         "wine": get_wine,
         "superconductivity": get_superconductivity,
@@ -82,13 +100,15 @@ def data_preparation(arrays):
 def numpy2torch(array):
     return torch.from_numpy(array.astype(np.float32)).to(DEVICE)
 
-def get_dataset(dataname, seed):
+def get_dataset(dataname, seed, validation):
     df, X, y = DATASETS[dataname]()
     Xs, ys = test_split(X, y, 0.1, seed)
-    Xs, _ = data_preparation(Xs)
+    if validation:    # split the training set and return validation set (not test set)
+        Xs, ys = test_split(Xs[0], ys[0], 0.2, seed)
+    Xs, X_scaler = data_preparation(Xs)
     ys, y_scaler = data_preparation(ys)
     datasets = map(TensorDataset, map(numpy2torch, Xs), map(numpy2torch, ys))
-    return tuple(datasets), y_scaler
+    return tuple(datasets), (X_scaler, y_scaler)
 
 
 def get_datasets():
@@ -129,18 +149,24 @@ def se(mean_pred, var_pred, y):
 
 
 def pit(mean_pred, var_pred, y):
+    var_pred = var_pred.clamp(min=EPS)
     return norm.cdf(y, loc=mean_pred, scale=torch.sqrt(var_pred))
 
 
-def metrics(mean, var, y, y_scaler):
+def transform(mean, var, y_scaler):
     mean = torch.from_numpy(y_scaler.inverse_transform(mean))
     var = torch.from_numpy(y_scaler.var_) * var
+    return mean, var
+
+
+def metrics(mean, var, y, y_scaler):
+    mean, var = transform(mean, var, y_scaler)
     y = torch.from_numpy(y_scaler.inverse_transform(y))
     return {
             "crps": torch.mean(crps(mean, var, y)).item(),
             "mae": torch.mean(torch.abs(mean - y)).item(),
             "nll": torch.mean(nll(mean, var, y)).item(),
-            "pit": wandb.Histogram(pit(mean, var, y)),
+            "pit": wandb.Histogram(pit(mean, var, y), num_bins=32),
             "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
             "sharpness": torch.mean(var).item(),
             "var": wandb.Histogram(var)}
@@ -157,7 +183,7 @@ class Model(nn.Module):
         super(Model, self).__init__()
         self.loss_function = {"crps": crps, "nll": nll, "se": se}[hyperparams["loss"]]
         neurons = hyperparams["neurons"]
-        self.model_mean = nn.Sequential(
+        self.model = nn.Sequential(
             nn.Linear(features, neurons),
             nn.ReLU(),
             nn.Linear(neurons, 1))
@@ -168,7 +194,10 @@ class Model(nn.Module):
         self.to(DEVICE)
 
     def forward(self, X):
-        return self.model_mean(X), F.softplus(self.model_var(X))
+        output = self.model(X)
+        # TODO torch.exp versus F.softplus output function for variance
+        mean, var = self.model(X), torch.exp(self.model_var(X))
+        return mean, var
 
     @torch.no_grad()
     def predict(self, dataset):
@@ -245,17 +274,18 @@ class DeepEnsemble:
 
 
 @click.command()
-@click.option("--bs", default=100, help="Batch size.")
+@click.option("--bs", default=64, help="Batch size.")
 @click.option("--dataname", required=True, help="Data set name.")
-@click.option("--epochs", default=40, help="Number of epochs.")
+@click.option("--epochs", default=1000, help="Number of epochs.")
 @click.option("--gamma", default=1.0, help="Multiplicative factor of learning rate decay.")
 @click.option("--loss", required=True, help="Loss function.")
-@click.option("--lr", default=0.1, help="Learning rate.")
+@click.option("--lr", default=0.001, help="Learning rate.")
 @click.option("--neurons", default=50, help="Number of neurons in the first hidden layer.")
 @click.option("--m", default=1, help="Number of model in deep ensemble.")
 @click.option("--modelname", type=click.Path(exists=True, dir_okay=False))
 @click.option("--seed", default=50, help="Seed for train and test set split.")
-@click.option("--step", default=256, help="Period of learning rate decay.")
+@click.option("--step", default=1, help="Period of learning rate decay.")
+@click.option("--validation", is_flag=True)
 @click.option("--wd", default=0.0, help="Weight decay.")
 def train(**hyperparams):
     # reproducibility
@@ -264,7 +294,8 @@ def train(**hyperparams):
     # TODO domain adaption setting
     # datasets, y_scaler = get_datasets()
     # trainset_source, testset_source, _, _ = datasets
-    (trainset, testset), y_scaler = get_dataset(hyperparams["dataname"], hyperparams["seed"])
+    (trainset, testset), (_, y_scaler) = get_dataset(
+            hyperparams["dataname"], hyperparams["seed"], hyperparams["validation"])
     features = trainset.tensors[0].shape[1]
     # generate random run name with loss information
     runname = "{}-{}-{}".format(hyperparams["loss"], hyperparams["m"], randint(1000, 9999))
