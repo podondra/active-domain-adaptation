@@ -159,55 +159,15 @@ def transform(mean, var, y_scaler):
     return mean, var
 
 
-def metrics(mean, var, y, y_scaler):
-    mean, var = transform(mean, var, y_scaler)
-    y = torch.from_numpy(y_scaler.inverse_transform(y))
-    return {
-            "crps": torch.mean(crps(mean, var, y)).item(),
-            "mae": torch.mean(torch.abs(mean - y)).item(),
-            "nll": torch.mean(nll(mean, var, y)).item(),
-            "pit": wandb.Histogram(pit(mean, var, y), num_bins=32),
-            "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
-            "sharpness": torch.mean(var).item(),
-            "var": wandb.Histogram(var)}
-
-
 def log(model, trainset, testset, y_scaler):
     wandb.log({
-        "train": metrics(*model.predict(trainset), get_y(trainset), y_scaler),
-        "test": metrics(*model.predict(testset), get_y(testset), y_scaler)})
+        "train": model.metrics(model.predict(trainset), get_y(trainset), y_scaler),
+        "test": model.metrics(model.predict(testset), get_y(testset), y_scaler)})
 
 
 class Model(nn.Module):
-    def __init__(self, features, hyperparams):
-        super(Model, self).__init__()
-        self.loss_function = {"crps": crps, "nll": nll, "se": se}[hyperparams["loss"]]
-        neurons = hyperparams["neurons"]
-        self.model = nn.Sequential(
-            nn.Linear(features, neurons),
-            nn.ReLU(),
-            nn.Linear(neurons, 1))
-        self.model_var = nn.Sequential(
-            nn.Linear(features, neurons),
-            nn.ReLU(),
-            nn.Linear(neurons, 1))
-        self.to(DEVICE)
-
-    def forward(self, X):
-        output = self.model(X)
-        # TODO torch.exp versus F.softplus output function for variance
-        mean, var = self.model(X), torch.exp(self.model_var(X))
-        return mean, var
-
-    @torch.no_grad()
-    def predict(self, dataset):
-        self.eval()
-        output = [self(batch[0]) for batch in DataLoader(dataset, batch_size=BS)]
-        mean, var = tuple(zip(*output))
-        return torch.concat(mean).cpu(), torch.concat(var).cpu()
-
-    def loss(self, y_pred, y):
-        return torch.mean(self.loss_function(*y_pred, y))
+    def __init__(self):
+        super().__init__()
 
     def train_epoch(self, trainloader, optimiser):
         self.train()
@@ -235,9 +195,95 @@ class Model(nn.Module):
         torch.save(self.state_dict(), MODELPATH.format(modelname))
 
 
+class Network(Model):
+    def __init__(self, features, hyperparams):
+        super().__init__()
+        self.loss_function = {"crps": crps, "nll": nll, "se": se}[hyperparams["loss"]]
+        neurons = hyperparams["neurons"]
+        self.model = nn.Sequential(
+            nn.Linear(features, neurons),
+            nn.ReLU(),
+            nn.Linear(neurons, 1))
+        self.model_var = nn.Sequential(
+            nn.Linear(features, neurons),
+            nn.ReLU(),
+            nn.Linear(neurons, 1))
+        self.to(DEVICE)
+
+    def forward(self, X):
+        # TODO torch.exp versus F.softplus output function for variance
+        mean = self.model(X)
+        var = torch.exp(self.model_var(X))
+        return mean, var
+
+    @torch.no_grad()
+    def predict(self, dataset):
+        self.eval()
+        output = [self(batch[0]) for batch in DataLoader(dataset, batch_size=BS)]
+        mean, var = tuple(zip(*output))
+        return torch.concat(mean).cpu(), torch.concat(var).cpu()
+
+    def loss(self, y_pred, y):
+        return torch.mean(self.loss_function(*y_pred, y))
+
+    def metrics(self, y_pred, y, y_scaler):
+        mean, var = y_pred
+        mean, var = transform(mean, var, y_scaler)
+        y = torch.from_numpy(y_scaler.inverse_transform(y))
+        return {
+                "crps": torch.mean(crps(mean, var, y)).item(),
+                "mae": torch.mean(torch.abs(mean - y)).item(),
+                "nll": torch.mean(nll(mean, var, y)).item(),
+                "pit": wandb.Histogram(pit(mean, var, y), num_bins=32),
+                "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
+                "sharpness": torch.mean(var).item(),
+                "var": wandb.Histogram(var)}
+
+
+class MixtureDensityNetwork(Model):
+    def __init__(self, features, hyperparams):
+        super().__init__()
+        # TODO choose NLL or CRPS loss funciton
+        self.K = hyperparams["k"]
+        neurons = hyperparams["neurons"]
+        self.model = nn.Sequential(
+            nn.Linear(features, neurons),
+            nn.ReLU(),
+            nn.Linear(neurons, 3 * self.K))
+        self.to(DEVICE)
+
+    def forward(self, X):
+        output = self.model(X)
+        coeffs = F.softmax(output[:, :self.K], dim=-1)
+        means = output[:, self.K:(2 * self.K)]
+        variances = torch.exp(output[:, (2 * self.K):])
+        return coeffs, means, variances
+
+    @torch.no_grad()
+    def predict(self, dataset):
+        self.eval()
+        output = [self(batch[0]) for batch in DataLoader(dataset, batch_size=BS)]
+        coeffs, means, variances = tuple(zip(*output))
+        return torch.cat(coeffs).cpu(), torch.cat(means).cpu(), torch.cat(variances).cpu()
+
+    def loss(self, y_pred, y):
+        coeffs, means, variances = y_pred
+        variances = variances.clone()
+        with torch.no_grad():
+            variances.clamp_(min=EPS)
+        losses = -torch.logsumexp(
+                torch.log(coeffs)
+                - 0.5 * torch.log(2.0 * math.pi * variances)
+                - 0.5 * ((y - means) ** 2 / variances), dim=-1)
+        return torch.mean(losses)
+
+    def metrics(self, y_pred, y, y_scaler):
+        return {"nll": self.loss(y_pred, y).item()}
+
+
 class DeepEnsemble:
     def __init__(self, features, hyperparams):
-        self.models = [Model(features, hyperparams) for _ in range(hyperparams["m"])]
+        self.models = [Network(features, hyperparams) for _ in range(hyperparams["m"])]
 
     @torch.no_grad()
     def predict(self, dataset):
@@ -278,6 +324,7 @@ class DeepEnsemble:
 @click.option("--dataname", required=True, help="Data set name.")
 @click.option("--epochs", default=1000, help="Number of epochs.")
 @click.option("--gamma", default=1.0, help="Multiplicative factor of learning rate decay.")
+@click.option("--k", default=1, help="Number of MDN components")
 @click.option("--loss", required=True, help="Loss function.")
 @click.option("--lr", default=0.001, help="Learning rate.")
 @click.option("--neurons", default=50, help="Number of neurons in the first hidden layer.")
@@ -298,10 +345,16 @@ def train(**hyperparams):
             hyperparams["dataname"], hyperparams["seed"], hyperparams["validation"])
     features = trainset.tensors[0].shape[1]
     # generate random run name with loss information
-    runname = "{}-{}-{}".format(hyperparams["loss"], hyperparams["m"], randint(1000, 9999))
+    runname = "{}-{}-{}-{}".format(
+            hyperparams["loss"], hyperparams["m"], hyperparams["k"], randint(1000, 9999))
     with wandb.init(config=hyperparams, name=runname, project="uci"):
         config = wandb.config
-        model = Model(features, config) if config["m"] == 1 else DeepEnsemble(features, config)
+        if config["m"] > 1:
+            model = DeepEnsemble(features, config)
+        elif config["k"] > 1:
+            model = MixtureDensityNetwork(features, config)
+        else:
+            model = Network(features, config)
         if config["modelname"] is not None:
             model.load(config["modelname"])
         model.train_epochs(trainset, testset, config, y_scaler)
