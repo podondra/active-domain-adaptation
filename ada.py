@@ -128,29 +128,9 @@ def get_y(dataset):
     return torch.concat([batch[-1] for batch in DataLoader(dataset, batch_size=BS)]).cpu()
 
 
-def nll(mean_pred, var_pred, y):
-    return F.gaussian_nll_loss(mean_pred, y, var_pred, eps=EPS, full=True, reduction="none")
-
-
-def crps(mean_pred, var_pred, y):
-    # clamp for stability: https://pytorch.org/docs/stable/_modules/torch/nn/functional.html#gaussian_nll_loss
-    var_pred = var_pred.clone()  # not to modify the original var
-    with torch.no_grad():
-        var_pred.clamp_(min=EPS)
-    std_pred = torch.sqrt(var_pred)
-    y_std = (y - mean_pred) / std_pred
-    cdf = 0.5 + 0.5 * torch.erf(y_std / math.sqrt(2.0))
-    pdf = (1.0 / math.sqrt(2.0 * math.pi)) * torch.exp(-0.5 * y_std ** 2)
-    return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / math.sqrt(math.pi))
-
-
-def se(mean_pred, var_pred, y):
-    return (y - mean_pred) ** 2
-
-
-def pit(mean_pred, var_pred, y):
-    var_pred = var_pred.clamp(min=EPS)
-    return norm.cdf(y, loc=mean_pred, scale=torch.sqrt(var_pred))
+def pit(mean, var, y):
+    var = var.clamp(min=EPS)
+    return norm.cdf(y, loc=mean, scale=torch.sqrt(var))
 
 
 def transform(mean, var, y_scaler):
@@ -168,6 +148,9 @@ def log(model, trainset, testset, y_scaler):
 class Model(nn.Module):
     def __init__(self):
         super().__init__()
+
+    def loss(self, y_pred, y):
+        return torch.mean(self.loss_function(*y_pred, y))
 
     def train_epoch(self, trainloader, optimiser):
         self.train()
@@ -193,6 +176,26 @@ class Model(nn.Module):
 
     def save(self, modelname):
         torch.save(self.state_dict(), MODELPATH.format(modelname))
+
+
+def nll(mean, var, y):
+    return F.gaussian_nll_loss(mean, y, var, eps=EPS, full=True, reduction="none")
+
+
+def crps(mean, var, y):
+    # clamp for stability: https://pytorch.org/docs/stable/_modules/torch/nn/functional.html#gaussian_nll_loss
+    var = var.clone()  # not to modify the original var
+    with torch.no_grad():
+        var.clamp_(min=EPS)
+    std_pred = torch.sqrt(var)
+    y_std = (y - mean) / std_pred
+    cdf = 0.5 + 0.5 * torch.erf(y_std / math.sqrt(2.0))
+    pdf = (1.0 / math.sqrt(2.0 * math.pi)) * torch.exp(-0.5 * y_std ** 2)
+    return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / math.sqrt(math.pi))
+
+
+def se(mean, var, y):
+    return (y - mean) ** 2
 
 
 class Network(Model):
@@ -223,9 +226,6 @@ class Network(Model):
         mean, var = tuple(zip(*output))
         return torch.concat(mean).cpu(), torch.concat(var).cpu()
 
-    def loss(self, y_pred, y):
-        return torch.mean(self.loss_function(*y_pred, y))
-
     def metrics(self, y_pred, y, y_scaler):
         mean, var = y_pred
         mean, var = transform(mean, var, y_scaler)
@@ -240,10 +240,21 @@ class Network(Model):
                 "var": wandb.Histogram(var)}
 
 
+def gmm_crps(coeffs, means, variances, y):
+    ...
+
+
+def gmm_nll(coeffs, means, variances, y):
+    variances = variances.clone()
+    with torch.no_grad():
+        variances.clamp_(min=EPS)
+    return -torch.logsumexp(torch.log(coeffs) - 0.5 * torch.log(2.0 * math.pi * variances) - 0.5 * ((y - means) ** 2 / variances), dim=-1)
+
+
 class MixtureDensityNetwork(Model):
     def __init__(self, features, hyperparams):
         super().__init__()
-        # TODO choose NLL or CRPS loss funciton
+        self.loss_function = {"crps": gmm_crps, "nll": gmm_nll}[hyperparams["loss"]]
         self.K = hyperparams["k"]
         neurons = hyperparams["neurons"]
         self.model = nn.Sequential(
@@ -265,17 +276,6 @@ class MixtureDensityNetwork(Model):
         output = [self(batch[0]) for batch in DataLoader(dataset, batch_size=BS)]
         coeffs, means, variances = tuple(zip(*output))
         return torch.cat(coeffs).cpu(), torch.cat(means).cpu(), torch.cat(variances).cpu()
-
-    def loss(self, y_pred, y):
-        coeffs, means, variances = y_pred
-        variances = variances.clone()
-        with torch.no_grad():
-            variances.clamp_(min=EPS)
-        losses = -torch.logsumexp(
-                torch.log(coeffs)
-                - 0.5 * torch.log(2.0 * math.pi * variances)
-                - 0.5 * ((y - means) ** 2 / variances), dim=-1)
-        return torch.mean(losses)
 
     def metrics(self, y_pred, y, y_scaler):
         return {"nll": self.loss(y_pred, y).item()}
