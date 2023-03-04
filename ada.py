@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 import torch
 from torch import nn
 from torch.optim import Adam
@@ -92,27 +91,52 @@ def test_split(X, y, test_size, seed):
     return (X_train, X_test), (y_train, y_test)
 
 
+class StandardScaler:
+    def __init__(self):
+        pass
+
+    def fit(self, X):
+        self.mean = torch.mean(X, dim=0, keepdim=True)
+        self.std = torch.std(X, dim=0, unbiased=True, keepdim=True)
+        self.variance = self.std ** 2
+        return self
+
+    def transform(self, X):
+        return (X - self.mean) / self.std
+
+    def inverse_transform(self, X):
+        return self.std * X + self.mean
+
+    def inverse_transform_variance(self, variance):
+        return self.variance * variance
+
+
 def data_preparation(arrays):
     scaler = StandardScaler().fit(arrays[0])   # fit on (source) train
     return map(scaler.transform, arrays), scaler
 
 
 def numpy2torch(array):
-    return torch.from_numpy(array.astype(np.float32)).to(DEVICE)
+    return torch.from_numpy(array.astype(np.float32))
+
+def to_device(tensor):
+    return tensor.to(DEVICE)
 
 def get_dataset(dataname, seed, validation):
     df, X, y = DATASETS[dataname]()
+    X, y = numpy2torch(X), numpy2torch(y)
     Xs, ys = test_split(X, y, 0.1, seed)
     if validation:    # split the training set and return validation set (not test set)
         Xs, ys = test_split(Xs[0], ys[0], 0.2, seed)
     Xs, X_scaler = data_preparation(Xs)
     ys, y_scaler = data_preparation(ys)
-    datasets = map(TensorDataset, map(numpy2torch, Xs), map(numpy2torch, ys))
+    datasets = map(TensorDataset, map(to_device, Xs), map(to_device, ys))
     return tuple(datasets), (X_scaler, y_scaler)
 
 
 def get_datasets():
     df, X, y = get_superconductivity()
+    X, y = numpy2torch(X), numpy2torch(y)
     percentiles = df[SPLIT_COLUMN].quantile([0.25, 0.75])
     domain_source = domain_split(df, X, y, -np.inf, percentiles[0.25])
     domain_target = domain_split(df, X, y, percentiles[0.75], np.inf)
@@ -120,23 +144,12 @@ def get_datasets():
     Xs_target, ys_target = test_split(*domain_target, 0.2, seed=96)
     Xs, _ = data_preparation(Xs_source + Xs_target)    # "+" chains tuples
     ys, y_scaler = data_preparation(ys_source + ys_target)
-    datasets = map(TensorDataset, map(numpy2torch, Xs), map(numpy2torch, ys))
+    datasets = map(TensorDataset, map(to_device, Xs), map(to_device, ys))
     return tuple(datasets), y_scaler
 
 
 def get_y(dataset):
     return torch.concat([batch[-1] for batch in DataLoader(dataset, batch_size=BS)]).cpu()
-
-
-def pit(mean, var, y):
-    var = var.clamp(min=EPS)
-    return norm.cdf(y, loc=mean, scale=torch.sqrt(var))
-
-
-def transform(mean, var, y_scaler):
-    mean = torch.from_numpy(y_scaler.inverse_transform(mean))
-    var = torch.from_numpy(y_scaler.var_) * var
-    return mean, var
 
 
 def log(model, trainset, testset, y_scaler):
@@ -165,90 +178,132 @@ class Model(nn.Module):
         scheduler = StepLR(optimiser, step_size=hyperparams["step"], gamma=hyperparams["gamma"])
         trainloader = DataLoader(trainset, batch_size=hyperparams["bs"], shuffle=True)
         log(self, trainset, testset, y_scaler)
-        for epoch in range(1, hyperparams["epochs"] + 1):
+        for epoch in range(hyperparams["epochs"]):
             self.train_epoch(trainloader, optimiser)
             scheduler.step()
             log(self, trainset, testset, y_scaler)
         return self
 
     def load(self, modelname):
-        self.load_state_dict(torch.load(MODELPATH.format(modelname)))
+        self.load_state_dict(torch.load(MODELPATH.format(modelname), map_location=DEVICE))
 
     def save(self, modelname):
         torch.save(self.state_dict(), MODELPATH.format(modelname))
 
 
-def nll(mean, var, y):
-    return F.gaussian_nll_loss(mean, y, var, eps=EPS, full=True, reduction="none")
+def nll(mean, variance, y):
+    return F.gaussian_nll_loss(mean, y, variance, eps=EPS, full=True, reduction="none")
 
 
-def crps(mean, var, y):
-    # clamp for stability: https://pytorch.org/docs/stable/_modules/torch/nn/functional.html#gaussian_nll_loss
-    var = var.clone()  # not to modify the original var
+def clamp(tensor):
+    # clamp for stability
+    # https://pytorch.org/docs/stable/_modules/torch/nn/functional.html#gaussian_nll_loss
+    tensor = tensor.clone()  # not to modify the original tensor
     with torch.no_grad():
-        var.clamp_(min=EPS)
-    std_pred = torch.sqrt(var)
-    y_std = (y - mean) / std_pred
-    cdf = 0.5 + 0.5 * torch.erf(y_std / math.sqrt(2.0))
-    pdf = (1.0 / math.sqrt(2.0 * math.pi)) * torch.exp(-0.5 * y_std ** 2)
-    return std_pred * (y_std * (2.0 * cdf - 1.0) + 2.0 * pdf - 1.0 / math.sqrt(math.pi))
+        tensor.clamp_(min=EPS)
+    return tensor
 
 
-def se(mean, var, y):
+def standard_normal_pdf(x):
+    return (1.0 / math.sqrt(2.0 * math.pi)) * torch.exp(-0.5 * x ** 2)
+
+
+def standard_normal_cdf(x):
+    return 0.5 + 0.5 * torch.erf(x / math.sqrt(2.0))
+
+
+def normal_cdf(x, mean, variance):
+    return 0.5 + 0.5 * torch.erf((x - mean) / (torch.sqrt(variance) * math.sqrt(2.0)))
+
+
+def normal_pdf(x, mean, variance):
+    return (1.0 / (torch.sqrt(2.0 * math.pi * variance))) * torch.exp(-0.5 * ((x - mean) ** 2 / variance))
+
+
+def crps(mean, variance, y):
+    variance = clamp(variance)
+    std = torch.sqrt(variance)
+    y = (y - mean) / std
+    return std * (y * (2.0 * standard_normal_cdf(y) - 1.0) + 2.0 * standard_normal_pdf(y) - 1.0 / math.sqrt(math.pi))
+
+
+def se(mean, variance, y):
     return (y - mean) ** 2
+
+
+def pit(mean, variance, y):
+    variance = variance.clamp(min=EPS)
+    return normal_cdf(y, mean, variance)
 
 
 class Network(Model):
     def __init__(self, features, hyperparams):
         super().__init__()
         self.loss_function = {"crps": crps, "nll": nll, "se": se}[hyperparams["loss"]]
-        neurons = hyperparams["neurons"]
         self.model = nn.Sequential(
-            nn.Linear(features, neurons),
+            nn.Linear(features, hyperparams["neurons"]),
             nn.ReLU(),
-            nn.Linear(neurons, 1))
-        self.model_var = nn.Sequential(
-            nn.Linear(features, neurons),
+            nn.Linear(hyperparams["neurons"], 1))
+        self.model_variance = nn.Sequential(
+            nn.Linear(features, hyperparams["neurons"]),
             nn.ReLU(),
-            nn.Linear(neurons, 1))
+            nn.Linear(hyperparams["neurons"], 1))
         self.to(DEVICE)
 
     def forward(self, X):
-        # TODO torch.exp versus F.softplus output function for variance
+        # torch.exp versus F.softplus output function for variance
+        # mdn: exp give nans
         mean = self.model(X)
-        var = torch.exp(self.model_var(X))
-        return mean, var
+        variance = F.softplus(self.model_variance(X))
+        return mean, variance
 
     @torch.no_grad()
     def predict(self, dataset):
         self.eval()
         output = [self(batch[0]) for batch in DataLoader(dataset, batch_size=BS)]
-        mean, var = tuple(zip(*output))
-        return torch.concat(mean).cpu(), torch.concat(var).cpu()
+        mean, variance = tuple(zip(*output))
+        return torch.concat(mean).cpu(), torch.concat(variance).cpu()
 
     def metrics(self, y_pred, y, y_scaler):
-        mean, var = y_pred
-        mean, var = transform(mean, var, y_scaler)
-        y = torch.from_numpy(y_scaler.inverse_transform(y))
+        mean, variance = y_pred
+        mean = y_scaler.inverse_transform(mean)
+        variance = y_scaler.inverse_transform_variance(variance)
+        y = y_scaler.inverse_transform(y)
         return {
-                "crps": torch.mean(crps(mean, var, y)).item(),
+                "crps": torch.mean(crps(mean, variance, y)).item(),
                 "mae": torch.mean(torch.abs(mean - y)).item(),
-                "nll": torch.mean(nll(mean, var, y)).item(),
-                "pit": wandb.Histogram(pit(mean, var, y), num_bins=32),
+                "nll": torch.mean(nll(mean, variance, y)).item(),
+                "pit": wandb.Histogram(pit(mean, variance, y), num_bins=32),
                 "rmse": torch.sqrt(torch.mean(torch.square(mean - y))).item(),
-                "sharpness": torch.mean(var).item(),
-                "var": wandb.Histogram(var)}
+                "sharpness": torch.mean(variance).item(),
+                "variance": wandb.Histogram(variance)}
+
+
+# TODO rename
+def A(mean, variance):
+    std = torch.sqrt(variance)
+    return 2.0 * std * standard_normal_pdf(mean / std) + mean * (2.0 * standard_normal_cdf(mean / std) - 1)
 
 
 def gmm_crps(coeffs, means, variances, y):
-    ...
+    variances = clamp(variances)
+    return torch.unsqueeze(torch.sum(coeffs * A(y - means, variances), dim=1)
+            - 0.5 * torch.sum(
+                (coeffs[:, :, None] * coeffs[:, None, :])
+                * A(means[:, :, None] - means[:, None, :], variances[:, :, None] + variances[:, None, :]),
+                dim=(1, 2)), dim=-1)
 
 
 def gmm_nll(coeffs, means, variances, y):
-    variances = variances.clone()
-    with torch.no_grad():
-        variances.clamp_(min=EPS)
-    return -torch.logsumexp(torch.log(coeffs) - 0.5 * torch.log(2.0 * math.pi * variances) - 0.5 * ((y - means) ** 2 / variances), dim=-1)
+    variances = clamp(variances)
+    return -torch.log(torch.sum(coeffs * normal_pdf(y, means, variances), dim=-1, keepdim=True))
+    #coeffs = clamp(coeffs)
+    #return -torch.logsumexp(torch.log(coeffs) - 0.5 * torch.log(2.0 * math.pi * variances) - 0.5 * ((y - means) ** 2 / variances), dim=-1, keepdim=True)
+
+
+def gmm_pit(coeffs, means, variances, y):
+    variances = variances.clamp(min=EPS)
+    return torch.sum(coeffs * normal_cdf(y, means, variances), dim=-1, keepdim=True)
 
 
 class MixtureDensityNetwork(Model):
@@ -256,18 +311,17 @@ class MixtureDensityNetwork(Model):
         super().__init__()
         self.loss_function = {"crps": gmm_crps, "nll": gmm_nll}[hyperparams["loss"]]
         self.K = hyperparams["k"]
-        neurons = hyperparams["neurons"]
         self.model = nn.Sequential(
-            nn.Linear(features, neurons),
+            nn.Linear(features, hyperparams["neurons"]),
             nn.ReLU(),
-            nn.Linear(neurons, 3 * self.K))
+            nn.Linear(hyperparams["neurons"], 3 * self.K))
         self.to(DEVICE)
 
     def forward(self, X):
         output = self.model(X)
         coeffs = F.softmax(output[:, :self.K], dim=-1)
         means = output[:, self.K:(2 * self.K)]
-        variances = torch.exp(output[:, (2 * self.K):])
+        variances = F.softplus(output[:, (2 * self.K):])
         return coeffs, means, variances
 
     @torch.no_grad()
@@ -278,7 +332,14 @@ class MixtureDensityNetwork(Model):
         return torch.cat(coeffs).cpu(), torch.cat(means).cpu(), torch.cat(variances).cpu()
 
     def metrics(self, y_pred, y, y_scaler):
-        return {"nll": self.loss(y_pred, y).item()}
+        coeffs, means, variances = y_pred
+        means = y_scaler.inverse_transform(means)
+        variances = y_scaler.inverse_transform_variance(variances)
+        y = y_scaler.inverse_transform(y)
+        return {
+                "crps": torch.mean(gmm_crps(coeffs, means, variances, y)).item(),
+                "nll": torch.mean(gmm_nll(coeffs, means, variances, y)).item(),
+                "pit": wandb.Histogram(gmm_pit(coeffs, means, variances, y), num_bins=32)}
 
 
 class DeepEnsemble:
@@ -292,8 +353,8 @@ class DeepEnsemble:
         means = torch.concat(means, dim=1)
         variances = torch.concat(variances, dim=1)
         mean = torch.mean(means, dim=1, keepdim=True)
-        var = torch.mean(variances + torch.square(means), dim=1, keepdim=True) - torch.square(mean)
-        return mean, var
+        variance = torch.mean(variances + torch.square(means), dim=1, keepdim=True) - torch.square(mean)
+        return mean, variance
 
     def train_epochs(self, trainset, testset, hyperparams, y_scaler):
         optimisers = [
@@ -312,7 +373,7 @@ class DeepEnsemble:
 
     def load(self, modelname):
         for i, model in enumerate(self.models):
-            model.load_state_dict(torch.load(ENSEMBLEPATH.format(modelname, i)))
+            model.load_state_dict(torch.load(ENSEMBLEPATH.format(modelname, i), map_location=DEVICE))
 
     def save(self, modelname):
         for i, model in enumerate(self.models):
@@ -357,6 +418,7 @@ def train(**hyperparams):
             model = Network(features, config)
         if config["modelname"] is not None:
             model.load(config["modelname"])
+        wandb.watch(model)
         model.train_epochs(trainset, testset, config, y_scaler)
         model.save(runname)
 
