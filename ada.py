@@ -354,10 +354,11 @@ def standard_normal_cdf(x):
 
 
 def normal_cdf(x, mean, variance):
-    return 0.5 + 0.5 * torch.erf((x - mean) / (torch.sqrt(variance) * math.sqrt(2.0)))
+    return 0.5 + 0.5 * torch.erf((x - mean) / (torch.sqrt(clamp(variance)) * math.sqrt(2.0)))
 
 
 def normal_pdf(x, mean, variance):
+    variance = clamp(variance)
     return (1.0 / (torch.sqrt(2.0 * math.pi * variance))) * torch.exp(-0.5 * ((x - mean) ** 2 / variance))
 
 
@@ -377,10 +378,8 @@ def calibration_curve(ax, reliabilities):
 
 
 def crps(mean, variance, y):
-    variance = clamp(variance)
-    std = torch.sqrt(variance)
-    y = (y - mean) / std
-    return std * (y * (2.0 * standard_normal_cdf(y) - 1.0) + 2.0 * standard_normal_pdf(y) - 1.0 / math.sqrt(math.pi))
+    y = (y - mean) / torch.sqrt(clamp(variance))
+    return torch.sqrt(variance) * (y * (2.0 * standard_normal_cdf(y) - 1.0) + 2.0 * standard_normal_pdf(y) - 1.0 / math.sqrt(math.pi))
 
 
 def se(mean, variance, y):
@@ -388,7 +387,6 @@ def se(mean, variance, y):
 
 
 def normal_pit(mean, variance, y):
-    variance = variance.clamp(min=EPS)
     return normal_cdf(y, mean, variance)
 
 
@@ -434,12 +432,11 @@ class NeuralNetwork(Model):
 
 # TODO rename
 def A(mean, variance):
-    std = torch.sqrt(variance)
-    return 2.0 * std * standard_normal_pdf(mean / std) + mean * (2.0 * standard_normal_cdf(mean / std) - 1)
+    mean_std = mean / torch.sqrt(clamp(variance))
+    return 2.0 * torch.sqrt(variance) * standard_normal_pdf(mean_std) + mean * (2.0 * standard_normal_cdf(mean_std) - 1)
 
 
 def gmm_crps(coeffs, means, variances, y):
-    variances = clamp(variances)
     return torch.unsqueeze(torch.sum(coeffs * A(y - means, variances), dim=1)
             - 0.5 * torch.sum(
                 (coeffs[:, :, None] * coeffs[:, None, :])
@@ -449,9 +446,14 @@ def gmm_crps(coeffs, means, variances, y):
 
 def gmm_nll(coeffs, means, variances, y):
     variances = clamp(variances)
-    return -torch.log(torch.sum(coeffs * normal_pdf(y, means, variances), dim=-1, keepdim=True))
-    #coeffs = clamp(coeffs)
-    #return -torch.logsumexp(torch.log(coeffs) - 0.5 * torch.log(2.0 * math.pi * variances) - 0.5 * ((y - means) ** 2 / variances), dim=-1, keepdim=True)
+    coeffs = clamp(coeffs)
+    return -torch.logsumexp(
+            torch.log(coeffs)
+            - 0.5 * torch.log(2.0 * math.pi * variances)
+            - 0.5 * ((y - means) ** 2 / variances),
+            dim=-1, keepdim=True)
+    #return -torch.log(torch.sum(coeffs * normal_pdf(y, means, variances), dim=-1, keepdim=True))
+
 
 def gmm_cdf(x, coeffs, means, variances):
     return torch.sum(coeffs * normal_cdf(x, means, variances), dim=-1, keepdim=True)
@@ -462,7 +464,6 @@ def gmm_pdf(x, coeffs, means, variances):
 
 
 def gmm_pit(coeffs, means, variances, y):
-    variances = variances.clamp(min=EPS)
     return torch.sum(coeffs * normal_cdf(y, means, variances), dim=-1, keepdim=True)
 
 
