@@ -32,6 +32,136 @@ def get_inverse(n=1000, seed=13):
     y += rng.normal(scale=0.05, size=(n, 1))
     return None, x, y
 
+def get_boston(datapath="data/housing.data"):
+    # https://archive.ics.uci.edu/ml/machine-learning-databases/housing/
+    # Title: Boston Housing Data
+    # Relevant Information: Concerns housing values in suburbs of Boston.
+    # Number of Instances: 506
+    # Number of Attributes:
+    #    13 continuous attributes (including "class" attribute "MEDV"), 1 binary-valued attribute.
+    # Attribute Information:
+    #    1. CRIM      per capita crime rate by town
+    #    2. ZN        proportion of residential land zoned for lots over 25,000 sq.ft.
+    #    3. INDUS     proportion of non-retail business acres per town
+    #    4. CHAS      Charles River dummy variable (= 1 if tract bounds river; 0 otherwise)
+    #    5. NOX       nitric oxides concentration (parts per 10 million)
+    #    6. RM        average number of rooms per dwelling
+    #    7. AGE       proportion of owner-occupied units built prior to 1940
+    #    8. DIS       weighted distances to five Boston employment centres
+    #    9. RAD       index of accessibility to radial highways
+    #    10. TAX      full-value property-tax rate per $10,000
+    #    11. PTRATIO  pupil-teacher ratio by town
+    #    12. B        1000(Bk - 0.63)^2 where Bk is the proportion of blacks by town
+    #    13. LSTAT    % lower status of the population
+    #    14. MEDV     Median value of owner-occupied homes in $1000's
+    df = pd.read_csv(datapath, dtype=np.float32, header=None, sep="\s+")
+    return df, df.values[:, :13], df.values[:, 13:]
+
+
+def get_concrete(datapath="data/Concrete_Data.xls"):
+    # https://archive.ics.uci.edu/ml/datasets/Concrete%20Compressive%20Strength
+    # Data Set Information:
+    #   Number of instances 1030
+    #   Number of Attributes 9
+    #   Attribute breakdown 8 quantitative input variables, and 1 quantitative output variable
+    # Attribute Information:
+    #   Given are the variable name, variable type, the measurement unit and a brief description.
+    #   The concrete compressive strength is the regression problem.
+    #   The order of this listing corresponds to the order of numerals along the rows of the database.
+    #   Name -- Data Type -- Measurement -- Description
+    #   Cement (component 1) -- quantitative -- kg in a m3 mixture -- Input Variable
+    #   Blast Furnace Slag (component 2) -- quantitative -- kg in a m3 mixture -- Input Variable
+    #   Fly Ash (component 3) -- quantitative -- kg in a m3 mixture -- Input Variable
+    #   Water (component 4) -- quantitative -- kg in a m3 mixture -- Input Variable
+    #   Superplasticizer (component 5) -- quantitative -- kg in a m3 mixture -- Input Variable
+    #   Coarse Aggregate (component 6) -- quantitative -- kg in a m3 mixture -- Input Variable
+    #   Fine Aggregate (component 7) -- quantitative -- kg in a m3 mixture -- Input Variable
+    #   Age -- quantitative -- Day (1~365) -- Input Variable
+    #   Concrete compressive strength -- quantitative -- MPa -- Output Variable
+    df = pd.read_excel(datapath, dtype=np.float32)
+    return df, df.values[:, :8], df.values[:, 8:]
+
+
+def get_energy(datapath="data/ENB2012_data.xlsx"):
+    # https://archive.ics.uci.edu/ml/datasets/energy+efficiency
+    # TODO There are two output variables.
+    # According to https://github.com/yaringal/DropoutUncertaintyExps, the first one it the one.
+    # https://archive.ics.uci.edu/ml/datasets/energy+efficiency
+    # Data Set Information:
+    #   We perform energy analysis using 12 different building shapes simulated in Ecotect.
+    #   The buildings differ with respect to the glazing area, the glazing area distribution, and the orientation, amongst other parameters.
+    #   We simulate various settings as functions of the afore-mentioned characteristics to obtain 768 building shapes.
+    #   The dataset comprises 768 samples and 8 features, aiming to predict two real valued responses.
+    #   It can also be used as a multi-class classification problem if the response is rounded to the nearest integer.
+    # Attribute Information:
+    #   The dataset contains eight attributes (or features, denoted by X1...X8) and two responses (or outcomes, denoted by y1 and y2).
+    #   The aim is to use the eight features to predict each of the two responses.
+    #   Specifically:
+    #   X1 Relative Compactness
+    #   X2 Surface Area
+    #   X3 Wall Area
+    #   X4 Roof Area
+    #   X5 Overall Height
+    #   X6 Orientation
+    #   X7 Glazing Area
+    #   X8 Glazing Area Distribution
+    #   y1 Heating Load
+    #   y2 Cooling Load
+    df = pd.read_excel(datapath, dtype=np.float32)
+    return df, df.values[:, :8], df.values[:, 8:9]
+
+
+def get_kin8nm(datapath="data/Dataset.data"):
+    df = pd.read_csv(datapath, dtype=np.float32, header=None, sep="\s+")
+    return df, df.values[:, :8], df.values[:, 8:]
+
+
+def get_naval(datapath="data/data.txt"):
+    # TODO there are again two target variables
+    # https://archive.ics.uci.edu/ml/datasets/Condition+Based+Maintenance+of+Naval+Propulsion+Plants
+    # Data Set Information:
+    #   The experiments have been carried out by means of a numerical simulator of a naval vessel (Frigate) characterized by a Gas Turbine (GT) propulsion plant.
+    #   The different blocks forming the complete simulator (Propeller, Hull, GT, Gear Box and Controller) have been developed and fine tuned over the year on several similar real propulsion plants.
+    #   In view of these observations the available data are in agreement with a possible real vessel.
+    #   In this release of the simulator it is also possible to take into account the performance decay over time of the GT components such as GT compressor and turbines.
+    #   The propulsion system behaviour has been described with this parameters:
+    #   - Ship speed (linear function of the lever position lp).
+    #   - Compressor degradation coefficient kMc.
+    #   - Turbine degradation coefficient kMt.
+    #   so that each possible degradation state can be described by a combination of this triple (lp,kMt,kMc).
+    #   The range of decay of compressor and turbine has been sampled with an uniform grid of precision 0.001 so to have a good granularity of representation.
+    #   In particular for the compressor decay state discretization the kMc coefficient has been investigated in the domain [1; 0.95], and the turbine coefficient in the domain [1; 0.975].
+    #   Ship speed has been investigated sampling the range of feasible speed from 3 knots to 27 knots with a granularity of representation equal to tree knots.
+    #   A series of measures (16 features) which indirectly represents of the state of the system subject to performance decay has been acquired and stored in the dataset over the parameter's space.
+    # Attribute Information:
+    #   - A 16-feature vector containing the GT measures at steady state of the physical asset:
+    #   Lever position (lp) [ ]
+    #   Ship speed (v) [knots]
+    #   Gas Turbine (GT) shaft torque (GTT) [kN m]
+    #   GT rate of revolutions (GTn) [rpm]
+    #   Gas Generator rate of revolutions (GGn) [rpm]
+    #   Starboard Propeller Torque (Ts) [kN]
+    #   Port Propeller Torque (Tp) [kN]
+    #   Hight Pressure (HP) Turbine exit temperature (T48) [C]
+    #   GT Compressor inlet air temperature (T1) [C]
+    #   GT Compressor outlet air temperature (T2) [C]
+    #   HP Turbine exit pressure (P48) [bar]
+    #   GT Compressor inlet air pressure (P1) [bar]
+    #   GT Compressor outlet air pressure (P2) [bar]
+    #   GT exhaust gas pressure (Pexh) [bar]
+    #   Turbine Injecton Control (TIC) [%]
+    #   Fuel flow (mf) [kg/s]
+    #   - GT Compressor decay state coefficient
+    #   - GT Turbine decay state coefficient
+    df = pd.read_csv(datapath, dtype=np.float32, header=None, sep="\s+")
+    return df, df.values[:, :16], df.values[:, 16:17]
+
+
+def get_power(datapath="data/Folds5x2_pp.xlsx"):
+    # https://archive.ics.uci.edu/ml/datasets/Combined+Cycle+Power+Plant
+    df = pd.read_excel(datapath, dtype=np.float32)
+    return df, df.values[:, :4], df.values[:, 4:]
+
 
 def get_protein(datapath="data/CASP.csv"):
     df = pd.read_csv(datapath, dtype=np.float32)
@@ -55,21 +185,34 @@ def get_wine(datapath="data/winequality-red.csv"):
     return df, df.values[:, :11], df.values[:, 11:]
 
 
-# TODO You should respect the following train / test split:
-# train: first 463,715 examples
-# test: last 51,630 examples
-# It avoids the 'producer effect' by making sure no song
-# from a given artist ends up in both the train and test set.
+def get_yacht(datapath="data/yacht_hydrodynamics.data"):
+    df = pd.read_csv(datapath, dtype=np.float32, header=None, sep="\s+")
+    return df, df.values[:, :6], df.values[:, 6:]
+
+
 def get_year(datapath="data/YearPredictionMSD.txt"):
+    # https://archive.ics.uci.edu/ml/datasets/YearPredictionMSD
+    # TODO You should respect the following train / test split:
+    # train: first 463,715 examples
+    # test: last 51,630 examples
+    # It avoids the 'producer effect' by making sure no song
+    # from a given artist ends up in both the train and test set.
     df = pd.read_csv(datapath, dtype=np.float32, header=None)
     return df, df.values[:, 1:], df.values[:, :1]
 
 
 DATASETS = {
+        "boston": get_boston,
+        "concrete": get_concrete,
+        "energy": get_energy,
         "inverse": get_inverse,
+        "kin8nm": get_kin8nm,
+        "naval": get_naval,
+        "power": get_power,
         "protein": get_protein,
-        "wine": get_wine,
         "superconductivity": get_superconductivity,
+        "wine": get_wine,
+        "yacht": get_yacht,
         "year": get_year}
 
 
@@ -91,6 +234,7 @@ class StandardScaler:
     def fit(self, X):
         self.mean = torch.mean(X, dim=0, keepdim=True)
         self.std = torch.std(X, dim=0, unbiased=True, keepdim=True)
+        self.std[self.std == 0.0] = 1.0
         self.variance = self.std ** 2
         return self
 
