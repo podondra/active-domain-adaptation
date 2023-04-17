@@ -346,7 +346,7 @@ def get_dataset(dataname, seed, validation, preparation):
     X, y = numpy2torch(X), numpy2torch(y)
     Xs, ys = test_split(X, y, 0.1, seed)
     if validation:    # split the training set and return validation set (not test set)
-        Xs, ys = test_split(Xs[0], ys[0], 0.2, seed)
+        Xs, ys = test_split(Xs[0], ys[0], 0.1, seed)
     X_scaler, y_scaler = None, None
     if preparation:
         Xs, X_scaler = data_preparation(Xs)
@@ -475,7 +475,7 @@ class NeuralNetwork(Model):
         super().__init__()
         self.loss_function = {"crps": crps, "nll": nll, "se": se}[hyperparams["loss"]]
         layers = [nn.Linear(features, hyperparams["neurons"]), nn.ReLU()]
-        for _ in range(hyperparams["hiddens"]):
+        for _ in range(hyperparams["hiddens"] - 1):
             layers += [nn.Linear(hyperparams["neurons"], hyperparams["neurons"]), nn.ReLU()]
         layers += [nn.Linear(hyperparams["neurons"], 2)]
         self.model = nn.Sequential(*layers)
@@ -554,7 +554,7 @@ class MixtureDensityNetwork(Model):
         self.loss_function = {"crps": gmm_crps, "nll": gmm_nll}[hyperparams["loss"]]
         self.K = hyperparams["k"]
         layers = [nn.Linear(features, hyperparams["neurons"]), nn.ReLU()]
-        for _ in range(hyperparams["hiddens"]):
+        for _ in range(hyperparams["hiddens"] - 1):
             layers += [nn.Linear(hyperparams["neurons"], hyperparams["neurons"]), nn.ReLU()]
         layers += [nn.Linear(hyperparams["neurons"], 3 * self.K)]
         self.model = nn.Sequential(*layers)
@@ -643,9 +643,9 @@ class DeepEnsemble:
 @click.option("--dataname", required=True, help="Data set name.")
 @click.option("--epochs", default=1000, help="Number of epochs.")
 @click.option("--gamma", default=1.0, help="Multiplicative factor of learning rate decay.")
-@click.option("--hiddens", default=0, help="Number of hidden layers.")
+@click.option("--hiddens", default=1, help="Number of hidden layers.")
 @click.option("--k", default=1, help="Number of MDN components.")
-@click.option("--loss", required=True, help="Loss function.")
+@click.option("--loss", default="nll", help="Loss function.")
 @click.option("--lr", default=0.001, help="Learning rate.")
 @click.option("--neurons", default=50, help="Number of neurons in the first hidden layer.")
 @click.option("--m", default=1, help="Number of model in deep ensemble.")
